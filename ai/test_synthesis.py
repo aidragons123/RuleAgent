@@ -51,12 +51,23 @@ def _boundary_vectors_for_rule(rule: BusinessRule) -> list[dict] | None:
     if rid == "R-003":
         return [_mk(rid, "Zero balance: expect tier 1, zero interest.", "300001", "00000000.00")]
 
-    if rid in ("R-004", "R-005", "R-006", "R-007", "R-014"):
+    if rid in ("R-004", "R-014"):
+        # umbrella rules: cover all three tiers, since a bug anywhere
+        # in the rate/tier logic should be visible through either.
         return [
             _mk(rid, "Mid-tier-1 balance.", "300010", "00000500.00"),
             _mk(rid, "Mid-tier-2 balance.", "300011", "00005000.00"),
             _mk(rid, "Mid-tier-3 balance (below cap crossover).", "300012", "00012000.00"),
         ]
+
+    if rid == "R-005":
+        return [_mk(rid, "Mid-tier-1 balance - this rule's own rate only.", "300013", "00000500.00")]
+
+    if rid == "R-006":
+        return [_mk(rid, "Mid-tier-2 balance - this rule's own rate only.", "300014", "00005000.00")]
+
+    if rid == "R-007":
+        return [_mk(rid, "Mid-tier-3 balance - this rule's own rate only.", "300015", "00012000.00")]
 
     if rid in ("R-008", "R-016", "R-017"):
         return [

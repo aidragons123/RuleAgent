@@ -54,8 +54,13 @@ seed = []
 n = 0
 for balance in [50, 250, 750, 1500, 3000, 7000, 11500, 13200, 15900]:
     n += 1
+    # Tag only R-004/R-014 (the general "interest = balance*rate for its
+    # tier" rules) plus the ONE tier-rate rule this specific balance
+    # actually exercises - never all three tier-rate rules on a single
+    # vector, since a given balance can only be in one tier.
+    tier_rule = "R-005" if balance <= 1000 else ("R-006" if balance <= 10000 else "R-007")
     seed.append(vec(
-        f"SEED-{n:03d}", ["R-004", "R-005", "R-006", "R-007", "R-014"],
+        f"SEED-{n:03d}", ["R-004", "R-014", tier_rule],
         "Easy happy-path balance, mid-tier, no boundary, no pathology.",
         account_id=100000 + n, balance=balance,
         adj_digits7=1234500 + n, adj_sign="+", adj_last_digit=random.randint(1, 8),

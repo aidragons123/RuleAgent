@@ -31,7 +31,36 @@ make demo         # THE ONE COMMAND — happy flow, then two negative
 make score        # held-back evaluation set, pass rate + rule coverage
 make score REPEAT=2   # + run-to-run variance report
 make ui           # Streamlit UI over the same pipeline
+
+make compare                    # THE TWO-SCENARIO DEMO (see below)
+make compare BUG=overpunch_table
+make compare BUG=year_pivot
 ```
+
+## The two-scenario demo: valid code vs. invalid code
+
+`make compare` runs the exact same 24 rules against the exact same test
+vectors **twice**: once against the clean AI-generated implementation, once
+against a version with one real bug deliberately injected. Both reports are
+written to disk so you can open them side by side:
+
+- `out/evidence_pack_valid.html` — code generated properly → the targeted
+  rule shows **VALIDATED**
+- `out/evidence_pack_invalid.html` — same rule, one real bug → shows
+  **INVALIDATED — implementation defect**, with the exact vector, expected
+  vs. actual value, and the diagnosis
+
+Three ready-made bugs to demo with (`BUG=`):
+
+| Bug | What it breaks | Rule that flips |
+|---|---|---|
+| `tier1_rate` (default) | tier-1 interest rate coded as 1.5% instead of 1% | R-005 (plus R-003/R-004/R-014, which legitimately share the same `interest` field) |
+| `overpunch_table` | two digit-positions swapped in the sign-decode table | R-011 (plus R-012, same field) |
+| `year_pivot` | pivot year coded as 60 instead of 50 | R-013 only — the cleanest single-rule flip to demo |
+
+The same toggle is in the Streamlit UI (`make ui`) as a **Code variant**
+radio button in the sidebar — pick "Clean" or one of the three bug variants,
+click Run, and watch the rule-by-rule table flip live.
 
 Open in VS Code with `code .` — it's a plain Python project, no special
 tooling required beyond the above.

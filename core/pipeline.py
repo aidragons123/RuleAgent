@@ -106,7 +106,8 @@ class Pipeline:
         self.rules_by_id = {r.id: r for r in self.rules}
 
     def run(self, include_synthesised: bool = True, extra_vectors: list[TestVector] | None = None,
-            run_id: str = "run", synthesis_rule_ids: list[str] | None = None) -> PipelineResult:
+            run_id: str = "run", synthesis_rule_ids: list[str] | None = None,
+            evidence_out_path: Path | None = None) -> PipelineResult:
         cfg = self.cfg
         tracer = Tracer(
             case_ids=[run_id], model=cfg["llm"]["model"],
@@ -216,7 +217,10 @@ class Pipeline:
         tracer.record_step("Draft evidence sections", "ai", detail=f"{len(sections)} sections")
 
         # ---- step 9: render the approval pack --------------------------------
-        evidence_path = render_evidence_pack(facts, sections)
+        if evidence_out_path is not None:
+            evidence_path = render_evidence_pack(facts, sections, out_path=evidence_out_path)
+        else:
+            evidence_path = render_evidence_pack(facts, sections)
         tracer.record_step("Render the approval pack", "deterministic", detail=str(evidence_path))
 
         tracer.finalize({

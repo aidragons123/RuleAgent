@@ -10,13 +10,27 @@ the rest are for working the build.
   python run.py trace --last      # print/open the most recent trace
   python run.py baseline          # run with a trivial stub "AI layer"
                                    # (the 0:30 starting point) for comparison
+
+  python run.py compare [BUG]     # THE TWO-SCENARIO DEMO. Runs the SAME
+                                   # 24 rules against the SAME vectors
+                                   # twice: once against the clean
+                                   # generated code (report: VALID),
+                                   # once against a version with one
+                                   # real bug injected (report: that
+                                   # rule flips to INVALID). BUG is one
+                                   # of: tier1_rate, overpunch_table,
+                                   # year_pivot (default: tier1_rate).
+                                   # Writes out/evidence_pack_valid.html
+                                   # and out/evidence_pack_invalid.html.
 """
 from __future__ import annotations
 
+import os
 import sys
 import webbrowser
 from pathlib import Path
 
+from ai.implementation import BUG_VARIANTS
 from core.pipeline import Pipeline, load_heldback_vectors, load_seed_vectors
 from core.models import TestVector
 
@@ -157,6 +171,69 @@ def run_baseline():
     print("This is the starting point before any AI-generated implementation exists.")
 
 
+def run_compare(bug: str):
+    """Runs the exact same rules against the exact same vectors twice -
+    once against the clean generated code, once with `bug` injected -
+    and prints the rule-by-rule report for both, side by side. This is
+    the practical scenario the report is meant to demonstrate: code
+    generated properly -> VALIDATED; code with a real defect ->
+    INVALIDATED, and the report says exactly which rule and why."""
+    if bug not in BUG_VARIANTS:
+        print(f"Unknown bug {bug!r}. Known: {', '.join(BUG_VARIANTS)}")
+        sys.exit(1)
+
+    vectors = load_seed_vectors() + load_heldback_vectors()
+    target_rule = BUG_VARIANTS[bug]["rule_id"]
+
+    print(f"=== SCENARIO 1: code generated properly (clean) ===")
+    os.environ.pop("UC04_INJECT_BUG", None)
+    pipeline_clean = Pipeline()
+    result_clean = pipeline_clean.run(
+        include_synthesised=True, extra_vectors=vectors, run_id="compare-valid",
+        evidence_out_path=REPO_ROOT / "out" / "evidence_pack_valid.html",
+    )
+    row_clean = next(r for r in result_clean.matrix if r.rule_id == target_rule)
+    print(f"  {target_rule}: {row_clean.status}  (flaw side: {row_clean.flaw_side}, "
+          f"{len(row_clean.diagnoses)} diagnoses)")
+    print(f"  report: {result_clean.evidence_path}")
+
+    print(f"\n=== SCENARIO 2: code with an injected defect ({bug}) ===")
+    print(f"  {BUG_VARIANTS[bug]['description']}")
+    os.environ["UC04_INJECT_BUG"] = bug
+    try:
+        pipeline_bug = Pipeline()
+        result_bug = pipeline_bug.run(
+            include_synthesised=True, extra_vectors=vectors, run_id="compare-invalid",
+            evidence_out_path=REPO_ROOT / "out" / "evidence_pack_invalid.html",
+        )
+    finally:
+        os.environ.pop("UC04_INJECT_BUG", None)
+    row_bug = next(r for r in result_bug.matrix if r.rule_id == target_rule)
+    print(f"  {target_rule}: {row_bug.status}  (flaw side: {row_bug.flaw_side}, "
+          f"{len(row_bug.diagnoses)} diagnoses)")
+    for d in row_bug.diagnoses[:3]:
+        print(f"    - {d.vector_id} ({d.cause}): {d.explanation}")
+    print(f"  report: {result_bug.evidence_path}")
+
+    print(f"\n=== impact on every OTHER rule ===")
+    changed_others = [
+        (rc.rule_id, rc.status, rb.status)
+        for rc, rb in zip(result_clean.matrix, result_bug.matrix)
+        if rc.rule_id != target_rule and rc.status != rb.status
+    ]
+    if not changed_others:
+        print(f"  confirmed - only {target_rule} changed status. The bug is fully isolated.")
+    else:
+        print(f"  {target_rule} is the rule this bug targets. These rules ALSO changed "
+              f"because they legitimately share the same output field (expected, not a leak):")
+        for rid, before, after in changed_others:
+            print(f"    {rid}: {before} -> {after}")
+
+    print(f"\nSide by side:")
+    print(f"  clean report:   {result_clean.evidence_path}  ->  {target_rule} = {row_clean.status}")
+    print(f"  buggy report:   {result_bug.evidence_path}  ->  {target_rule} = {row_bug.status}")
+
+
 def main():
     args = sys.argv[1:]
     if not args:
@@ -171,6 +248,9 @@ def main():
         run_trace_last()
     elif cmd == "baseline":
         run_baseline()
+    elif cmd == "compare":
+        bug = args[1] if len(args) > 1 else "tier1_rate"
+        run_compare(bug)
     else:
         print(__doc__)
         sys.exit(1)

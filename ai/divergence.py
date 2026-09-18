@@ -117,6 +117,7 @@ class DivergenceAI(AILayer):
                 "value": {
                     "vector_id": divergence.vector_id,
                     "rule_ids": divergence.rule_ids,
+                    "field": divergence.field,
                     "cause": cause,
                     "explanation": explanation,
                     "fix_suggested": fix,

@@ -1,4 +1,4 @@
-.PHONY: setup test verify demo score freeze-manifest baseline case trace ui clean
+.PHONY: setup test verify demo score freeze-manifest baseline case trace ui compare clean
 
 PYTHON ?= python3
 
@@ -35,6 +35,13 @@ freeze-manifest:
 
 baseline:
 	$(PYTHON) run.py baseline
+
+# THE TWO-SCENARIO DEMO: same rules, same vectors, run twice - once
+# against clean generated code (report: VALID), once with one real bug
+# injected (report: that rule flips to INVALID). BUG defaults to
+# tier1_rate; also try overpunch_table or year_pivot.
+compare:
+	$(PYTHON) run.py compare $(if $(BUG),$(BUG),tier1_rate)
 
 case:
 	$(PYTHON) run.py case $(CASE_ID)

@@ -11,6 +11,7 @@ Run with: streamlit run streamlit_app.py   (or `make ui`)
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -18,6 +19,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from ai.implementation import BUG_VARIANTS  # noqa: E402
 from core.pipeline import Pipeline, load_heldback_vectors, load_seed_vectors  # noqa: E402
 
 st.set_page_config(page_title="UC-04 · From Validated Rules to Tested Code", layout="wide")
@@ -73,6 +75,11 @@ st.caption(
     "divergence diagnosis and evidence generation against a golden GnuCOBOL runtime."
 )
 
+VARIANT_OPTIONS = {
+    "✅ Clean (code generated properly)": None,
+    **{f"❌ Bug injected: {v['description']}": key for key, v in BUG_VARIANTS.items()},
+}
+
 with st.sidebar:
     st.header("Run the pipeline")
     scope = st.selectbox("Scope", [
@@ -81,6 +88,14 @@ with st.sidebar:
         "Rounding (R-009)",
         "Untraceable cap behaviour",
     ])
+    st.divider()
+    st.subheader("Code variant")
+    st.caption(
+        "The two practical scenarios: run the SAME rules against the SAME "
+        "generated code, clean vs. with one real bug injected."
+    )
+    variant_label = st.radio("Generated implementation", list(VARIANT_OPTIONS.keys()))
+    bug = VARIANT_OPTIONS[variant_label]
     run_clicked = st.button("▶ Run", type="primary", use_container_width=True)
     st.divider()
     st.caption(
@@ -89,9 +104,15 @@ with st.sidebar:
     )
 
 if run_clicked:
-    with st.spinner(f"Running: {scope}..."):
+    if bug:
+        os.environ["UC04_INJECT_BUG"] = bug
+    else:
+        os.environ.pop("UC04_INJECT_BUG", None)
+    with st.spinner(f"Running: {scope} ({'clean' if not bug else bug})..."):
         st.session_state["result"] = run_scope(scope)
         st.session_state["scope"] = scope
+        st.session_state["bug"] = bug
+    os.environ.pop("UC04_INJECT_BUG", None)
 
 result = st.session_state.get("result")
 
@@ -100,6 +121,18 @@ if result is None:
     st.stop()
 
 facts = result.facts
+active_bug = st.session_state.get("bug")
+
+if active_bug:
+    v = BUG_VARIANTS[active_bug]
+    st.error(
+        f"**Bug injected: `{active_bug}`** — {v['description']} "
+        f"Expect **{v['rule_id']}** to show INVALIDATED below (flaw side: code)."
+    )
+else:
+    st.success("**Clean generated code** — no bug injected. Rules with a real "
+               "divergence below are genuine ambiguous-rule, rounding, or "
+               "untraceable-behaviour findings, not implementation defects.")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Rules validated (flawless)", facts.rules_validated)

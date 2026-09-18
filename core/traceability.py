@@ -40,9 +40,23 @@ def build_traceability_matrix(
     source: SourceFile,
     diagnoses: list[Diagnosis],
 ) -> list[TraceabilityRow]:
+    rules_by_id = {r.id: r for r in rules}
+
+    # A diagnosis only counts against a rule if the field that actually
+    # diverged is one that rule's own `fields:` list (validated_rules.yaml)
+    # says it governs. Without this, a vector tagged for one rule (e.g.
+    # R-011, the overpunch rule) that happens to also diverge on an
+    # unrelated field (e.g. `interest`, because of a completely separate
+    # tier-rate bug) would wrongly drag R-011's status down too - a vector
+    # can be tagged with several rule ids, but a given field-level
+    # divergence belongs to whichever of those rules actually claims that
+    # field, not all of them.
     diag_by_rule: dict[str, list[Diagnosis]] = defaultdict(list)
     for d in diagnoses:
         for rid in d.rule_ids:
+            rule = rules_by_id.get(rid)
+            if rule is not None and d.field and d.field not in rule.fields:
+                continue
             diag_by_rule[rid].append(d)
 
     rows: list[TraceabilityRow] = []

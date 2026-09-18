@@ -101,6 +101,7 @@ class DivergenceRecord(BaseModel):
 class Diagnosis(BaseModel):
     vector_id: str
     rule_ids: list[str]
+    field: str = ""   # which output field actually diverged
     cause: DiagnosisCause
     explanation: str
     fix_suggested: str = ""

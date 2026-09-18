@@ -10,6 +10,8 @@ citation; nothing is implemented that isn't backed by one.
 """
 from __future__ import annotations
 
+import os
+
 from ai_platform.ai_contract import AILayer, AIResult
 from core.models import BusinessRule, IOSignature, SourceFile, TestVector
 
@@ -119,6 +121,53 @@ _CITATIONS = {
     "compute": ["R-002", "R-003", "R-018", "R-019", "R-022"],
 }
 
+# ---------------------------------------------------------------------------
+# Deliberate bug injection - for demoing the two practical scenarios side by
+# side: "code generated properly -> VALIDATED report" vs "code has a real
+# defect -> INVALIDATED report, correctly caught". Off by default
+# (UC04_INJECT_BUG unset = the clean implementation above, unchanged).
+#
+# Each variant introduces exactly ONE genuine implementation bug into a rule
+# that is otherwise fully VALIDATED, so the validation report flips that one
+# rule to INVALIDATED_DEFECT (flaw side: code) while every other rule is
+# unaffected. This is different from the ambiguous-rule / rounding /
+# untraceable-behaviour findings already seeded in the oracle - those are
+# legitimate disagreements; this is a plain coding mistake, on purpose, so
+# the diagnosis layer has something unambiguous to correctly call a defect.
+# ---------------------------------------------------------------------------
+BUG_VARIANTS = {
+    "tier1_rate": {
+        "rule_id": "R-005",
+        "description": "Tier-1 interest rate coded as 1.5% instead of 1%.",
+        "find": 'return 1, Decimal("0.010")',
+        "replace": 'return 1, Decimal("0.015")  # BUG: should be 0.010 per R-005',
+    },
+    "overpunch_table": {
+        "rule_id": "R-011",
+        "description": "Positive overpunch table has two digit-positions swapped.",
+        "find": 'OVERPUNCH_POS = "{ABCDEFGHI"',
+        "replace": 'OVERPUNCH_POS = "{ABCDEFGIH"  # BUG: digits 8/9 swapped, breaks R-011',
+    },
+    "year_pivot": {
+        "rule_id": "R-013",
+        "description": "Year-pivot threshold coded as 60 instead of 50.",
+        "find": "return 1900 + yy if yy >= 50 else 2000 + yy",
+        "replace": "return 1900 + yy if yy >= 60 else 2000 + yy  # BUG: should be 50 per R-013",
+    },
+}
+
+
+def _build_source(bug: str | None) -> str:
+    source = _GENERATED_SOURCE
+    if bug:
+        variant = BUG_VARIANTS.get(bug)
+        if variant is None:
+            raise ValueError(f"Unknown UC04_INJECT_BUG={bug!r}. Known: {list(BUG_VARIANTS)}")
+        if variant["find"] not in source:
+            raise AssertionError("bug-injection anchor text not found in template")
+        source = source.replace(variant["find"], variant["replace"], 1)
+    return source
+
 
 class ImplementationAI(AILayer):
     def generate(
@@ -132,11 +181,25 @@ class ImplementationAI(AILayer):
             "sample_inputs": [t.input for t in tests[:5]],
         }
 
+        bug = os.environ.get("UC04_INJECT_BUG") or None
+
         def _mock():
+            content = _build_source(bug)
+            reasoning = (
+                "Reimplemented every rule with an observable output field. "
+                "Deliberately did not guess at unobserved oracle behaviour "
+                "(no rule describes a cap), and made an explicit, documented "
+                "choice on the rounding tie-break R-009 leaves open."
+            )
+            if bug:
+                reasoning += (
+                    f" [DEMO ONLY: UC04_INJECT_BUG={bug!r} is active - "
+                    f"{BUG_VARIANTS[bug]['description']}]"
+                )
             return {
                 "value": {
                     "path": "generated/intcalc_generated.py",
-                    "content": _GENERATED_SOURCE,
+                    "content": content,
                     "citations": _CITATIONS,
                 },
                 "confidence": 0.85,
@@ -145,12 +208,7 @@ class ImplementationAI(AILayer):
                     for rid in sorted({rid for rids in _CITATIONS.values() for rid in rids})
                 ],
                 "abstained": False,
-                "reasoning": (
-                    "Reimplemented every rule with an observable output field. "
-                    "Deliberately did not guess at unobserved oracle behaviour "
-                    "(no rule describes a cap), and made an explicit, documented "
-                    "choice on the rounding tie-break R-009 leaves open."
-                ),
+                "reasoning": reasoning,
             }
 
         ctx["_mock"] = _mock
