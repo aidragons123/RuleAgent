@@ -1,0 +1,103 @@
+# io_signature.yaml
+# The input/output contract for INTCALC. Field names, types, COMP-3
+# scales and the sign convention. Everything ai/implementation.py
+# generates must honour this exactly - it is not yours to redefine.
+#
+# Wire protocol: one pipe-delimited ASCII line in, one pipe-delimited
+# ASCII line out (see core/cobol_runner.py). This file is the schema
+# for both sides of that line.
+
+protocol:
+  delimiter: "|"
+  encoding: ascii
+
+inputs:
+  - name: account_id
+    field: ACCTID
+    type: string
+    width: 6
+    notes: Zero-padded numeric account id, not itself business-meaningful.
+
+  - name: balance
+    field: BALANCE
+    type: decimal
+    scale: 2
+    signed: false
+    width: 10
+    comp3: true
+    notes: >
+      Deposit balance. Stored internally as PIC S9(7)V99 COMP-3.
+      Assume non-negative for all in-scope vectors unless a rule says
+      otherwise.
+
+  - name: adjustment_overpunch
+    field: ADJRAW
+    type: overpunch
+    width: 8
+    notes: >
+      Zoned-decimal trailing-sign ("overpunch") encoding. The first 7
+      characters are digits; the 8th character encodes BOTH the sign
+      and the final digit, per the standard convention:
+        positive 0-9 -> { A B C D E F G H I
+        negative 0-9 -> } J K L M N O P Q R
+      Decoded magnitude is the 7 digits (with the 8th replaced by the
+      decoded final digit) divided by 100, i.e. PIC S9(5)V99.
+      This is a representation an implementation can get wrong in two
+      independent ways: picking the wrong table, or getting the sign
+      right but the final-digit substitution wrong.
+
+  - name: member_since_yy
+    field: YY
+    type: string
+    width: 2
+    notes: Two-digit year, windowed - see rule R-013.
+
+  - name: member_since_mm
+    field: MM
+    type: string
+    width: 2
+
+  - name: member_since_dd
+    field: DD
+    type: string
+    width: 2
+
+outputs:
+  - name: tier
+    field: TIER
+    type: int
+    width: 1
+    domain: [1, 2, 3]
+
+  - name: interest
+    field: INTEREST
+    type: decimal
+    scale: 2
+    signed: true
+    comp3: true
+    notes: >
+      Computed and rounded (half-cent ties resolved away from zero,
+      per COBOL ROUNDED semantics) inside the oracle. The rounding
+      MODE is deliberately not restated in validated_rules.yaml - see
+      R-009's ambiguity note.
+
+  - name: adjustment_decoded
+    field: ADJ
+    type: decimal
+    scale: 2
+    signed: true
+    notes: Decoded value of adjustment_overpunch, sign prefixed (+/-).
+
+  - name: effective_year
+    field: EFFYEAR
+    type: int
+    width: 4
+
+  - name: capped
+    field: CAPPED
+    type: bool
+    domain: ["Y", "N"]
+    notes: >
+      True if a cap was applied. No rule in validated_rules.yaml
+      documents when or why this happens - see the traceability
+      report for the untraceable-behaviour finding this produces.

@@ -1,0 +1,23 @@
+# platform/config.yaml  (package lives on disk as ai_platform/ - see
+# README "A note on the platform/ folder name" for why).
+# PRE-BUILT. Thresholds and budgets the platform enforces on every AI
+# call. Not yours to loosen.
+
+llm:
+  mode: mock          # "mock" (offline, deterministic, default) | "real" (needs ANTHROPIC_API_KEY)
+  model: "claude-sonnet-5"
+  temperature: 0.0
+  seed: 20260918
+
+thresholds:
+  abstain_below: 0.55   # confidence floor - below this, auto-abstain
+
+budgets:
+  max_tokens_per_case: 20000
+
+tracing:
+  out_dir: "traces"
+
+scoring:
+  heldback_path: "data/vectors/heldback_vectors.jsonl"
+  baseline_pass_rate: 0.30   # your 0:30 baseline, naive-implementation score

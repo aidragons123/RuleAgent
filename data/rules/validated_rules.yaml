@@ -1,0 +1,205 @@
+# validated_rules.yaml
+# SME-validated business rules for INTCALC, R-001 to R-024.
+# Authoritative but, as you will discover, not complete: see R-014's
+# ambiguity note and the untraceable cap behaviour the traceability
+# checker finds that NO rule below describes.
+schema_version: 1
+rules:
+
+  - id: R-001
+    statement: >
+      The account id is a 6-digit numeric identifier. It is carried
+      through unchanged and plays no part in the interest calculation.
+    fields: [account_id]
+
+  - id: R-002
+    statement: >
+      Balance is a non-negative decimal amount expressed to exactly
+      two decimal places.
+    fields: [balance]
+
+  - id: R-003
+    statement: >
+      A balance of exactly zero yields zero interest and is billed at
+      the tier-1 rate.
+    fields: [balance, tier, interest]
+
+  - id: R-004
+    statement: >
+      Interest is computed as the account balance multiplied by the
+      rate for the balance's tier.
+    fields: [balance, tier, interest]
+
+  - id: R-005
+    statement: Tier 1 applies a rate of 1% (0.01).
+    fields: [tier, interest]
+
+  - id: R-006
+    statement: Tier 2 applies a rate of 2% (0.02).
+    fields: [tier, interest]
+
+  - id: R-007
+    statement: Tier 3 applies a rate of 3% (0.03).
+    fields: [tier, interest]
+
+  - id: R-008
+    statement: >
+      Tier 1 covers balances up to 1,000.00. Tier 2 covers balances
+      above 1,000.00 up to 10,000.00. Tier 3 covers balances above
+      10,000.00.
+    fields: [balance, tier]
+    note: >
+      "Up to" and "above" are the SME's own words, taken verbatim from
+      the interview transcript. They are ambiguous at the boundary
+      values themselves (1,000.00 and 10,000.00): a plain-English
+      reading supports both a strict and a non-strict interpretation.
+      This rule does not resolve that ambiguity - see R-016 and R-017
+      for the boundary restatements, and treat any boundary divergence
+      as a legitimate rule-ambiguity finding, not automatically an
+      implementation defect.
+
+  - id: R-009
+    statement: >
+      Interest amounts are rounded to the nearest cent before being
+      reported.
+    fields: [interest]
+    note: >
+      Deliberately silent on which way an exact half-cent (e.g.
+      x.xx5) is resolved. "Nearest cent" has no single tie-break
+      convention in ordinary English; COBOL's ROUNDED clause and a
+      naive Python round() do not agree on one. That is not this
+      rule's problem to pre-empt - it is the differential runner's job
+      to find, and the divergence-diagnosis layer's job to name.
+
+  - id: R-010
+    statement: >
+      Interest is always reported to exactly two decimal places, even
+      when the computed amount is zero (e.g. "0.00", never "0" or
+      "0.0").
+    fields: [interest]
+
+  - id: R-011
+    statement: >
+      The adjustment field arrives as a signed zoned-decimal amount
+      using trailing-overpunch sign notation. The sign and the final
+      digit of the magnitude are encoded together in the last
+      character and must be decoded jointly, not as two separate
+      steps.
+    fields: [adjustment_overpunch, adjustment_decoded]
+
+  - id: R-012
+    statement: >
+      A decoded adjustment amount of zero is always reported with a
+      positive sign, never a negative one.
+    fields: [adjustment_decoded]
+
+  - id: R-013
+    statement: >
+      The two-digit member-since year is windowed with a pivot at 50:
+      values 50-99 resolve to 1950-1999; values 00-49 resolve to
+      2000-2049.
+    fields: [member_since_yy, effective_year]
+
+  - id: R-014
+    statement: >
+      The system computes a three-tier interest rate on the account
+      balance: the tier is selected from the balance amount (see
+      R-008), and the interest is that balance multiplied by the
+      selected tier's rate (see R-005, R-006, R-007).
+    fields: [balance, tier, interest]
+    note: >
+      This is the umbrella rule for the whole tiered-interest
+      feature; R-005 through R-008 are its components. Treat it as
+      covered only when all four of those are independently covered
+      by traceable tests, not by one end-to-end happy-path vector
+      alone.
+
+  - id: R-015
+    statement: >
+      Member-since month and day are retained for record-keeping and
+      must be valid calendar values (month 01-12, day 01-31). They do
+      not affect the interest calculation.
+    fields: [member_since_mm, member_since_dd]
+
+  - id: R-016
+    statement: >
+      An account with a balance of exactly the tier-1 ceiling
+      (1,000.00) is billed at the tier-1 rate, not the tier-2 rate.
+    fields: [balance, tier]
+
+  - id: R-017
+    statement: >
+      An account with a balance of exactly the tier-2 ceiling
+      (10,000.00) is billed at the tier-2 rate, not the tier-3 rate.
+    fields: [balance, tier]
+
+  - id: R-018
+    statement: >
+      The output record is emitted as five pipe-delimited fields in a
+      fixed order: tier, interest, decoded adjustment (sign-prefixed),
+      effective year, and a single Y/N flag.
+    fields: [tier, interest, adjustment_decoded, effective_year, capped]
+
+  - id: R-019
+    statement: Interest must never be reported as a negative amount.
+    fields: [interest]
+
+  - id: R-020
+    statement: >
+      If the decoded adjustment's magnitude exceeds 999.99, the
+      record is an SME-escalation case for manual review. This is a
+      documentation-only policy rule about the surrounding business
+      process; it is not exercised by, or observable in, this
+      module's runtime output.
+    fields: [adjustment_decoded]
+    note: >
+      Out of runtime scope. A test that tries to assert an
+      escalation-flag output for this rule will fail, correctly -
+      there is nowhere in the signature for it to land. Synthesise
+      the boundary vector, but expect this one to abstain rather than
+      assert a value.
+
+  - id: R-021
+    statement: >
+      The account id field must never be reused as a sort key,
+      checksum, or hash input by any downstream consumer of this
+      module's output.
+    fields: [account_id]
+    note: >
+      A process constraint on callers of this module, not a
+      computation this module performs. Not independently observable
+      from a single call's output.
+
+  - id: R-022
+    statement: >
+      For audit purposes, every computed output record must be
+      exactly reproducible from its input line: calling this module
+      twice with the same input line must yield byte-identical output.
+    fields: [tier, interest, adjustment_decoded, effective_year, capped]
+    note: >
+      A determinism property, checked by make score REPEAT=2, not by
+      a single-call test vector.
+
+  - id: R-023
+    statement: >
+      Accounts whose effective member-since year is before 2000 are
+      flagged internally as "legacy tenure" for a downstream loyalty
+      report. This flag is not part of this module's output.
+    fields: [effective_year]
+
+  - id: R-024
+    statement: >
+      Accounts whose effective member-since year is 2000 or later are
+      flagged internally as "standard tenure" for the same downstream
+      loyalty report. This flag is not part of this module's output.
+    fields: [effective_year]
+    note: >
+      R-023 and R-024 describe mutually exclusive account states
+      (effective_year < 2000 vs >= 2000) whose only claimed effect is
+      on a downstream flag this module never emits. No single input
+      vector's effective_year can be both < 2000 and >= 2000, and no
+      field in io_signature.yaml exposes the flag either rule
+      describes - so neither rule is independently confirmable from
+      this module's output, and "one vector per rule" under-covers
+      the pair by construction. Say so in the evidence pack rather
+      than inventing an output field to test against.

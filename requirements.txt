@@ -1,0 +1,6 @@
+pydantic>=2.0
+pyyaml
+pytest
+streamlit
+# optional - only needed if ai_platform/config.yaml's llm.mode is "real"
+# anthropic
