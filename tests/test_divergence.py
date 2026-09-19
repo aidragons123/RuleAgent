@@ -1,15 +1,19 @@
 """tests/test_divergence.py - PRE-BUILT, do not modify.
 Diagnoses the real, seeded divergence classes. A diagnosis that
 attributes everything to an implementation defect fails - one of them
-is an ambiguous rule and one is a bad-representation choice, not a bug."""
-import importlib.util
+is an ambiguous rule and one is a bad-representation choice, not a bug.
+
+The generated implementation is compiled Java, run as its own
+subprocess per vector (core/java_runner.py) - never imported
+in-process."""
 from pathlib import Path
 
 from ai.divergence import DivergenceAI
+from ai.implementation import ImplementationAI
 from core.differential import run_differential
+from core.java_runner import JavaGeneratedModule, compile_java
 from core.pipeline import load_heldback_vectors
 from core.rules_loader import load_rules, load_signature
-from ai.implementation import ImplementationAI
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RULES = load_rules()
@@ -21,13 +25,8 @@ def _load_generated_module():
     ai = ImplementationAI(citation_resolver=lambda s, r: True)
     result = ai.generate(RULES, SIG, tests=[])
     source = result.value
-    path = REPO_ROOT / "generated" / "_test_divergence_intcalc.py"
-    path.parent.mkdir(exist_ok=True)
-    path.write_text(source.content)
-    spec = importlib.util.spec_from_file_location("test_div_gen", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    build_dir = compile_java(source)
+    return JavaGeneratedModule(build_dir, SIG)
 
 
 def _all_divergences():

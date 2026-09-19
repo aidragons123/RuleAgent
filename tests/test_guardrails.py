@@ -60,4 +60,4 @@ def test_untraceable_cap_is_reported_not_implemented():
     from ai.implementation import _GENERATED_SOURCE
     assert "500.00" not in _GENERATED_SOURCE
     assert '"Y"' not in _GENERATED_SOURCE
-    assert 'capped = "N"' in _GENERATED_SOURCE
+    assert 'String capped = "N";' in _GENERATED_SOURCE

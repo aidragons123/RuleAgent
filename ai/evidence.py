@@ -16,7 +16,7 @@ from core.models import EvidenceFacts, SectionKind
 
 def _change_summary(f: EvidenceFacts) -> str:
     return (
-        f"Run {f.run_id} re-implemented INTCALC.cbl in Python against all "
+        f"Run {f.run_id} re-implemented INTCALC.cbl in Java against all "
         f"{f.total_rules} SME-validated rules. {f.rules_validated} rules are "
         f"validated with no divergence found over their cited test vectors; "
         f"{f.rules_invalidated} rules produced at least one divergence, each "

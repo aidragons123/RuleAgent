@@ -94,7 +94,7 @@ class DivergenceRecord(BaseModel):
     expected: str
     actual: str
     cobol_output: dict[str, str]
-    python_output: dict[str, str]
+    modern_output: dict[str, str]
     input: dict[str, str]
 
 

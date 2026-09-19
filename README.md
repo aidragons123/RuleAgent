@@ -2,16 +2,23 @@
 
 An AI-assisted COBOL-modernisation pipeline: given a legacy COBOL module and
 a list of SME-validated business rules, an AI layer synthesises test
-vectors from the rules, generates a Python reimplementation, diffs it
-against the real COBOL oracle, diagnoses every divergence by cause, and
-renders a change-approval evidence pack — a **rule-by-rule validation
-report** showing exactly which rules are flawless and which are flawed,
-and on which side (the code, or the rule text itself).
+vectors from the rules, generates a **modern Java reimplementation**,
+compiles and diffs it against the real COBOL oracle, diagnoses every
+divergence by cause, and renders a change-approval evidence pack — a
+**rule-by-rule validation report** showing exactly which rules are flawless
+and which are flawed, and on which side (the code, or the rule text
+itself).
+
+Both the legacy COBOL and the AI-generated Java are real, compiled programs,
+invoked as subprocesses over the exact same pipe-delimited wire protocol
+(`data/signature/io_signature.yaml`) — nothing is simulated or hand-waved.
+The orchestration and UI are Python; the two things actually being compared
+(legacy vs. modern) are COBOL and Java.
 
 Runs end to end with **zero API keys** (a deterministic offline "mock LLM"
 backend is the default), and is pluggable to a real Claude call with one
-config line. GnuCOBOL is the only non-Python dependency, and it's a one-line
-install.
+config line. GnuCOBOL and a JDK are the two non-Python dependencies, and
+both are one-line installs.
 
 ## Quickstart
 
@@ -21,6 +28,9 @@ cd uc04-ai-assisted-delivery
 
 # GnuCOBOL - the oracle needs this to compile/run the real COBOL module
 apt-get install -y gnucobol         # macOS: brew install gnu-cobol
+
+# JDK - the generated "modern" reimplementation is compiled Java (17+)
+apt-get install -y default-jdk      # macOS: brew install openjdk
 
 pip install -r requirements.txt
 
@@ -62,8 +72,9 @@ The same toggle is in the Streamlit UI (`make ui`) as a **Code variant**
 radio button in the sidebar — pick "Clean" or one of the three bug variants,
 click Run, and watch the rule-by-rule table flip live.
 
-Open in VS Code with `code .` — it's a plain Python project, no special
-tooling required beyond the above.
+Open in VS Code with `code .` — the orchestration/UI is plain Python, the
+generated "modern" code is plain Java; no build tool (Maven/Gradle) or
+project file is needed, `javac`/`java` alone are enough.
 
 ## What you get out of the box
 
@@ -97,6 +108,7 @@ uc04-ai-assisted-delivery/
 │   ├── models.py            shared pydantic data model
 │   ├── rules_loader.py      loads rules + IO signature
 │   ├── cobol_runner.py      compiles & runs INTCALC.cbl — THE ORACLE
+│   ├── java_runner.py       compiles & runs the generated Java class
 │   ├── differential.py      runs oracle vs generated code, finds divergences
 │   ├── traceability.py      builds the rule → test → code matrix
 │   ├── harness.py           timing / coverage bookkeeping
@@ -110,14 +122,14 @@ uc04-ai-assisted-delivery/
 │   └── config.yaml          thresholds, budgets, LLM mode
 ├── ai/                      *** the AI layer — the actual judgement calls ***
 │   ├── test_synthesis.py    boundary-aware vector synthesis per rule
-│   ├── implementation.py    generates the Python reimplementation
+│   ├── implementation.py    generates the Java reimplementation
 │   ├── divergence.py        classifies why oracle and code disagree
 │   ├── evidence.py          drafts the change-approval pack's prose
 │   ├── prompts/*.md         the actual prompts (sent verbatim in "real" LLM mode)
 │   └── _mock_backend.py     shared helper math for the offline mock backend only
 ├── tests/                   PRE-BUILT pytest suite (scoring gate)
 ├── eval/score.py            held-back scoring + variance report
-├── generated/               AI-generated Python module lands here
+├── generated/               AI-generated GeneratedIntcalc.java (+ compiled .class) lands here
 ├── traces/                  one HTML trace per run
 ├── out/                     evidence_pack.html + score_report.json
 ├── run.py                   CLI (demo / case / trace / baseline)
@@ -143,9 +155,12 @@ work only by accident of import order.
    rule and the signature only, never an implementation (guardrail G1)
 3. **Golden output** comes from `core/cobol_runner.py` running the real,
    compiled COBOL — invoked lazily per vector, never assumed
-4. **Generate the implementation** (`ai/implementation.py`) — from rules +
-   signature only, never from golden outputs
-5. **Run both, find divergences** (`core/differential.py`)
+4. **Generate the implementation** (`ai/implementation.py`) — a Java class,
+   from rules + signature only, never from golden outputs
+5. **Run both, find divergences** (`core/differential.py`) — the Java is
+   compiled once (`core/java_runner.py`) and, like the COBOL oracle, run as
+   its own subprocess per vector over the same pipe-delimited wire protocol,
+   never imported in-process
 6. **Diagnose each divergence** (`ai/divergence.py`) — one of five causes:
    implementation defect, rounding/representation mismatch, ambiguous rule,
    untraceable behaviour, or a bad test vector — never a single
@@ -200,7 +215,8 @@ back to mock mode with a warning rather than breaking the run.
 The COBOL oracle (`data/src/legacy/INTCALC.cbl`) deliberately contains:
 
 1. **COMP-3 half-cent rounding** — `ROUNDED` resolves ties away from zero;
-   a natural Python reading (banker's rounding) does not.
+   a natural Java reading (`RoundingMode.HALF_EVEN`, banker's rounding)
+   does not.
 2. **Signed zoned-decimal overpunch** on the adjustment field — decoded
    correctly here (fully validated; see `io_signature.yaml`).
 3. **Two-digit year window**, pivot at 50 — decoded correctly here too.
@@ -220,5 +236,14 @@ The COBOL oracle (`data/src/legacy/INTCALC.cbl`) deliberately contains:
   automatically (synthesise a vector for it or explain why you can't).
 - Regenerate the vector files: `python data/vectors/_generate.py`.
 - The generated implementation always lands at
-  `generated/intcalc_generated.py` — read it after any run to see exactly
-  what the AI layer wrote and why (every branch carries a rule-id comment).
+  `generated/GeneratedIntcalc.java` (compiled to `generated/javabuild/`) —
+  read it after any run to see exactly what the AI layer wrote and why
+  (every method carries a rule-id comment).
+- Want a different target language instead of Java? Only two files know
+  the language: `ai/implementation.py` (emits the source + the wire-protocol
+  entry point) and `core/java_runner.py` (compiles/runs it). Everything else
+  — `core/differential.py`, `core/pipeline.py`, the diagnosis/evidence/UI
+  layers — only ever calls `.compute(input: dict) -> dict` on whatever
+  `core/differential.load_generated()` hands back, so swapping the target
+  language means writing one new `core/<lang>_runner.py` and pointing
+  `load_generated()` at it by file extension.

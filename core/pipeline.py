@@ -17,7 +17,7 @@ from ai.test_synthesis import TestSynthesisAI
 from ai_platform.config import get_config
 from ai_platform.tracer import Tracer
 
-from .differential import load_generated_module, run_differential
+from .differential import load_generated, run_differential
 from .evidence_render import render_evidence_pack
 from .harness import coverage_from_matrix
 from .models import (
@@ -158,7 +158,7 @@ class Pipeline:
         tracer.record_step("Generate the implementation", "ai", detail=source.path)
 
         # ---- step 5: run both, find divergences -------------------------
-        module = load_generated_module(source)
+        module = load_generated(source, self.sig)
         divergences = run_differential(vectors, module, self.sig)
         tracer.record_step("Run both, find divergences", "deterministic",
                             detail=f"{len(divergences)} field-level divergences")

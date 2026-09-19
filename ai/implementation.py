@@ -3,10 +3,17 @@ ai/implementation.py — YOU IMPLEMENT THIS.
 
 ImplementationAI.generate(rules, sig, tests) -> AIResult[SourceFile]
 
-Generates the Python reimplementation from the rules and the IO
-signature only (input vectors are given for shape; golden outputs are
-never given - guardrail G1). Every branch below carries a rule-id
+Generates the modernised Java reimplementation from the rules and the
+IO signature only (input vectors are given for shape; golden outputs
+are never given - guardrail G1). Every method below carries a rule-id
 citation; nothing is implemented that isn't backed by one.
+
+The generated class is compiled with `javac` and run as its own
+subprocess per test vector (core/java_runner.py), over the exact same
+pipe-delimited wire protocol the real COBOL oracle uses (see
+core/cobol_runner.py and data/signature/io_signature.yaml) - so the
+"modern" code is judged purely on its observable behaviour, the same
+way a real modernised service sitting behind an API would be.
 """
 from __future__ import annotations
 
@@ -15,109 +22,154 @@ import os
 from ai_platform.ai_contract import AILayer, AIResult
 from core.models import BusinessRule, IOSignature, SourceFile, TestVector
 
-_GENERATED_SOURCE = '''\
-"""
-generated/intcalc_generated.py
+_GENERATED_SOURCE = r'''
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 
-AI-GENERATED reimplementation of data/src/legacy/INTCALC.cbl, produced
-by ai/implementation.py from validated_rules.yaml and io_signature.yaml
-ONLY. No golden COBOL output was consulted while writing this file
-(guardrail G1) - it is scored by core/differential.py against the real
-oracle, and it is expected to disagree with the oracle in places. Those
-disagreements are the point of the exercise, not a bug in this file.
-"""
-from __future__ import annotations
+/**
+ * generated/GeneratedIntcalc.java
+ *
+ * AI-GENERATED reimplementation of data/src/legacy/INTCALC.cbl, produced
+ * by ai/implementation.py from validated_rules.yaml and io_signature.yaml
+ * ONLY. No golden COBOL output was consulted while writing this file
+ * (guardrail G1) - it is scored by core/differential.py against the real
+ * oracle, and it is expected to disagree with the oracle in places. Those
+ * disagreements are the point of the exercise, not a bug in this file.
+ *
+ * Wire protocol (data/signature/io_signature.yaml): reads one
+ * pipe-delimited line from stdin - account_id|balance|
+ * adjustment_overpunch|member_since_yy|member_since_mm|member_since_dd -
+ * and writes one pipe-delimited line to stdout - tier|interest|
+ * adjustment_decoded|effective_year|capped. This is the exact same
+ * contract the real COBOL oracle is invoked over (core/cobol_runner.py),
+ * so this class is compiled once and run as its own subprocess per
+ * vector, never imported in-process - the same arm's-length relationship
+ * a real modernised service would have with the legacy system it
+ * replaces.
+ */
+public class GeneratedIntcalc {
 
-from decimal import ROUND_HALF_EVEN, Decimal
+    private static final String OVERPUNCH_POS = "{ABCDEFGHI";
+    private static final String OVERPUNCH_NEG = "}JKLMNOPQR";
 
-OVERPUNCH_POS = "{ABCDEFGHI"
-OVERPUNCH_NEG = "}JKLMNOPQR"
-
-
-def decode_overpunch(raw: str) -> str:
-    # R-011: sign and final digit are encoded jointly in the last char.
-    # R-012: a decoded zero magnitude is always reported positive.
-    last = raw[-1]
-    if last in OVERPUNCH_POS:
-        sign, digit = "+", OVERPUNCH_POS.index(last)
-    elif last in OVERPUNCH_NEG:
-        sign, digit = "-", OVERPUNCH_NEG.index(last)
-    else:
-        raise ValueError(f"unrecognised overpunch character: {last!r}")
-    digits = raw[:6] + str(digit)  # first 6 digit chars unchanged, 7th replaced
-    value = Decimal(digits) / 100
-    if value == 0:
-        sign = "+"
-    return f"{sign}{value:08.2f}"
-
-
-def resolve_year(yy_str: str) -> int:
-    # R-013: two-digit year window, pivot at 50.
-    yy = int(yy_str)
-    return 1900 + yy if yy >= 50 else 2000 + yy
-
-
-def tier_and_rate(balance: Decimal) -> tuple[int, Decimal]:
-    # R-004, R-005, R-006, R-007, R-008, R-014: three-tier interest.
-    # R-016 / R-017: boundary restated as inclusive here - "up to X"
-    # is read as balance <= X stays in the lower tier, i.e. the tier
-    # changes when balance is STRICTLY GREATER than the ceiling reads
-    # naturally as ">=" the next tier's floor. This is one legitimate
-    # reading of R-008's own wording; the oracle's COBOL uses strict
-    # ">" instead - see the evidence pack's ambiguous-rule findings.
-    if balance >= Decimal("10000.00"):
-        return 3, Decimal("0.030")
-    if balance >= Decimal("1000.00"):
-        return 2, Decimal("0.020")
-    return 1, Decimal("0.010")
-
-
-def round_interest(raw: Decimal) -> Decimal:
-    # R-009: "rounded to the nearest cent" - the rule text does not
-    # specify a half-cent tie-break convention. Banker's rounding
-    # (round-half-to-even) is the IEEE/Python-idiomatic default choice
-    # here; it disagrees with COBOL's ROUNDED (half-away-from-zero) on
-    # exact ties. See the evidence pack for the ambiguous-rule finding
-    # this produces - this is not being hidden or silently "fixed".
-    # R-010: always exactly two decimal places.
-    return raw.quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
-
-
-def compute(input: dict) -> dict:
-    # R-002 / R-003: balance is a non-negative 2dp decimal; zero is tier 1.
-    # R-018: output is emitted as five fields, tier/interest/adjustment/
-    # effective_year/capped, in this order.
-    # R-019: interest is never negative (guaranteed: rate > 0, balance >= 0).
-    # R-022: this function is pure - same input always yields same output.
-    balance = Decimal(input["balance"])
-    tier, rate = tier_and_rate(balance)
-    raw_interest = balance * rate
-    interest = round_interest(raw_interest)
-
-    adjustment_decoded = decode_overpunch(input["adjustment_overpunch"])
-    effective_year = resolve_year(input["member_since_yy"])
-
-    # No rule in validated_rules.yaml describes any circumstance under
-    # which interest is adjusted downward after computation, so no cap
-    # is implemented here. If the oracle disagrees, that is exactly
-    # the untraceable-behaviour finding this exercise is designed to
-    # surface - see the traceability report, not a fix in this file.
-    capped = "N"
-
-    return {
-        "tier": str(tier),
-        "interest": f"{interest:.2f}",
-        "adjustment_decoded": adjustment_decoded,
-        "effective_year": str(effective_year),
-        "capped": capped,
+    // R-011: sign and final digit are encoded jointly in the last char.
+    // R-012: a decoded zero magnitude is always reported positive.
+    static String decodeOverpunch(String raw) {
+        char last = raw.charAt(raw.length() - 1);
+        String sign;
+        int digit;
+        int posIdx = OVERPUNCH_POS.indexOf(last);
+        int negIdx = OVERPUNCH_NEG.indexOf(last);
+        if (posIdx >= 0) {
+            sign = "+";
+            digit = posIdx;
+        } else if (negIdx >= 0) {
+            sign = "-";
+            digit = negIdx;
+        } else {
+            throw new IllegalArgumentException("unrecognised overpunch character: " + last);
+        }
+        String digits = raw.substring(0, 6) + digit; // first 6 digit chars unchanged, 7th replaced
+        BigDecimal value = new BigDecimal(digits).movePointLeft(2);
+        if (value.compareTo(BigDecimal.ZERO) == 0) {
+            sign = "+";
+        }
+        return sign + String.format("%08.2f", value);
     }
+
+    // R-013: two-digit year window, pivot at 50.
+    static int resolveYear(String yyStr) {
+        int yy = Integer.parseInt(yyStr.trim());
+        return yy >= 50 ? 1900 + yy : 2000 + yy;
+    }
+
+    static final class TierRate {
+        final int tier;
+        final BigDecimal rate;
+        TierRate(int tier, BigDecimal rate) { this.tier = tier; this.rate = rate; }
+    }
+
+    // R-004, R-005, R-006, R-007, R-008, R-014: three-tier interest.
+    // R-016 / R-017: boundary restated as inclusive here - "up to X" is
+    // read as balance <= X stays in the lower tier, i.e. the tier
+    // changes when balance is STRICTLY GREATER than the ceiling reads
+    // naturally as ">=" the next tier's floor. This is one legitimate
+    // reading of R-008's own wording; the oracle's COBOL uses strict
+    // ">" instead - see the evidence pack's ambiguous-rule findings.
+    static TierRate tierAndRate(BigDecimal balance) {
+        if (balance.compareTo(new BigDecimal("10000.00")) >= 0) {
+            return new TierRate(3, new BigDecimal("0.030"));
+        }
+        if (balance.compareTo(new BigDecimal("1000.00")) >= 0) {
+            return new TierRate(2, new BigDecimal("0.020"));
+        }
+        return new TierRate(1, new BigDecimal("0.010"));
+    }
+
+    // R-009: "rounded to the nearest cent" - the rule text does not
+    // specify a half-cent tie-break convention. Banker's rounding
+    // (round-half-even) is the IEEE-idiomatic default choice here; it
+    // disagrees with COBOL's ROUNDED (half-away-from-zero) on exact
+    // ties. See the evidence pack for the ambiguous-rule finding this
+    // produces - this is not being hidden or silently "fixed".
+    // R-010: always exactly two decimal places.
+    static BigDecimal roundInterest(BigDecimal raw) {
+        return raw.setScale(2, RoundingMode.HALF_EVEN);
+    }
+
+    // R-002 / R-003: balance is a non-negative 2dp decimal; zero is tier 1.
+    // R-018: output is emitted as five fields, tier/interest/adjustment/
+    // effective_year/capped, in this order.
+    // R-019: interest is never negative (guaranteed: rate > 0, balance >= 0).
+    // R-022: this method is pure - same input always yields same output.
+    static String[] compute(String[] in) {
+        BigDecimal balance = new BigDecimal(in[1].trim());
+        String adjustmentOverpunch = in[2].trim();
+        String memberSinceYy = in[3].trim();
+
+        TierRate tr = tierAndRate(balance);
+        BigDecimal rawInterest = balance.multiply(tr.rate);
+        BigDecimal interest = roundInterest(rawInterest);
+
+        String adjustmentDecoded = decodeOverpunch(adjustmentOverpunch);
+        int effectiveYear = resolveYear(memberSinceYy);
+
+        // No rule in validated_rules.yaml describes any circumstance under
+        // which interest is adjusted downward after computation, so no cap
+        // is implemented here. If the oracle disagrees, that is exactly
+        // the untraceable-behaviour finding this exercise is designed to
+        // surface - see the traceability report, not a fix in this file.
+        String capped = "N";
+
+        return new String[] {
+            String.valueOf(tr.tier),
+            interest.toPlainString(),
+            adjustmentDecoded,
+            String.valueOf(effectiveYear),
+            capped,
+        };
+    }
+
+    public static void main(String[] args) throws Exception {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
+        String line = reader.readLine();
+        if (line == null) {
+            System.exit(1);
+        }
+        String[] in = line.split("\\|", -1);
+        String[] out = compute(in);
+        System.out.println(String.join("|", out));
+    }
+}
 '''
 
 _CITATIONS = {
-    "decode_overpunch": ["R-011", "R-012"],
-    "resolve_year": ["R-013"],
-    "tier_and_rate": ["R-004", "R-005", "R-006", "R-007", "R-008", "R-014", "R-016", "R-017"],
-    "round_interest": ["R-009", "R-010"],
+    "decodeOverpunch": ["R-011", "R-012"],
+    "resolveYear": ["R-013"],
+    "tierAndRate": ["R-004", "R-005", "R-006", "R-007", "R-008", "R-014", "R-016", "R-017"],
+    "roundInterest": ["R-009", "R-010"],
     "compute": ["R-002", "R-003", "R-018", "R-019", "R-022"],
 }
 
@@ -139,20 +191,20 @@ BUG_VARIANTS = {
     "tier1_rate": {
         "rule_id": "R-005",
         "description": "Tier-1 interest rate coded as 1.5% instead of 1%.",
-        "find": 'return 1, Decimal("0.010")',
-        "replace": 'return 1, Decimal("0.015")  # BUG: should be 0.010 per R-005',
+        "find": 'return new TierRate(1, new BigDecimal("0.010"));',
+        "replace": 'return new TierRate(1, new BigDecimal("0.015")); // BUG: should be 0.010 per R-005',
     },
     "overpunch_table": {
         "rule_id": "R-011",
         "description": "Positive overpunch table has two digit-positions swapped.",
-        "find": 'OVERPUNCH_POS = "{ABCDEFGHI"',
-        "replace": 'OVERPUNCH_POS = "{ABCDEFGIH"  # BUG: digits 8/9 swapped, breaks R-011',
+        "find": 'private static final String OVERPUNCH_POS = "{ABCDEFGHI";',
+        "replace": 'private static final String OVERPUNCH_POS = "{ABCDEFGIH"; // BUG: digits 8/9 swapped, breaks R-011',
     },
     "year_pivot": {
         "rule_id": "R-013",
         "description": "Year-pivot threshold coded as 60 instead of 50.",
-        "find": "return 1900 + yy if yy >= 50 else 2000 + yy",
-        "replace": "return 1900 + yy if yy >= 60 else 2000 + yy  # BUG: should be 50 per R-013",
+        "find": "return yy >= 50 ? 1900 + yy : 2000 + yy;",
+        "replace": "return yy >= 60 ? 1900 + yy : 2000 + yy; // BUG: should be 50 per R-013",
     },
 }
 
@@ -186,10 +238,12 @@ class ImplementationAI(AILayer):
         def _mock():
             content = _build_source(bug)
             reasoning = (
-                "Reimplemented every rule with an observable output field. "
-                "Deliberately did not guess at unobserved oracle behaviour "
-                "(no rule describes a cap), and made an explicit, documented "
-                "choice on the rounding tie-break R-009 leaves open."
+                "Reimplemented every rule with an observable output field, as a "
+                "compilable Java class run over the same pipe-delimited wire "
+                "protocol as the COBOL oracle. Deliberately did not guess at "
+                "unobserved oracle behaviour (no rule describes a cap), and made "
+                "an explicit, documented choice on the rounding tie-break R-009 "
+                "leaves open."
             )
             if bug:
                 reasoning += (
@@ -198,7 +252,7 @@ class ImplementationAI(AILayer):
                 )
             return {
                 "value": {
-                    "path": "generated/intcalc_generated.py",
+                    "path": "generated/GeneratedIntcalc.java",
                     "content": content,
                     "citations": _CITATIONS,
                 },

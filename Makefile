@@ -5,6 +5,7 @@ PYTHON ?= python3
 setup:
 	$(PYTHON) -m pip install --break-system-packages -r requirements.txt
 	@which cobc >/dev/null 2>&1 || (echo "Installing GnuCOBOL..."; apt-get update -qq && apt-get install -y gnucobol)
+	@which javac >/dev/null 2>&1 || (echo "Installing a JDK..."; apt-get update -qq && apt-get install -y default-jdk)
 	@echo "Setup complete. Try: make demo"
 
 # THE ONE COMMAND. Runs the demo bar: happy flow, then the negative
@@ -53,5 +54,5 @@ ui:
 	$(PYTHON) -m streamlit run streamlit_app.py
 
 clean:
-	rm -rf traces/run_*.html out/*.html out/*.json generated/*.py __pycache__ .pytest_cache
+	rm -rf traces/run_*.html out/*.html out/*.json generated/*.py generated/*.java generated/javabuild __pycache__ .pytest_cache
 	find . -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true

@@ -15,6 +15,7 @@ import os
 import sys
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -22,24 +23,128 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ai.implementation import BUG_VARIANTS  # noqa: E402
 from core.pipeline import Pipeline, load_heldback_vectors, load_seed_vectors  # noqa: E402
 
-st.set_page_config(page_title="UC-04 · From Validated Rules to Tested Code", layout="wide")
+st.set_page_config(
+    page_title="UC-04 · From Validated Rules to Tested Code",
+    page_icon="🧪",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-STATUS_COLORS = {
-    "VALIDATED": "#e6f6e6",
-    "INVALIDATED_DEFECT": "#fdeaea",
-    "INVALIDATED_ROUNDING": "#fff6e0",
-    "INVALIDATED_AMBIGUOUS": "#fff6e0",
-    "UNCOVERABLE": "#f0f0f0",
-    "UNTESTED": "#f0f0f0",
+# ----------------------------------------------------------------- style
+STATUS_META = {
+    "VALIDATED":            {"bg": "#e9f9ee", "border": "#1e9e5a", "text": "#0f6b3c", "icon": "✅", "label": "Validated — flawless"},
+    "INVALIDATED_DEFECT":   {"bg": "#fdeceb", "border": "#d64545", "text": "#a02323", "icon": "❌", "label": "Invalidated — implementation defect"},
+    "INVALIDATED_ROUNDING": {"bg": "#fff6e0", "border": "#d99a1f", "text": "#8a6100", "icon": "⚠️", "label": "Invalidated — rounding / representation"},
+    "INVALIDATED_AMBIGUOUS":{"bg": "#fff6e0", "border": "#d99a1f", "text": "#8a6100", "icon": "⚠️", "label": "Invalidated — ambiguous rule text"},
+    "UNCOVERABLE":          {"bg": "#f2f2f4", "border": "#9a9aa2", "text": "#5a5a63", "icon": "◻️", "label": "Uncoverable"},
+    "UNTESTED":             {"bg": "#f2f2f4", "border": "#9a9aa2", "text": "#5a5a63", "icon": "◻️", "label": "Untested"},
 }
-STATUS_LABELS = {
-    "VALIDATED": "✅ VALIDATED — flawless",
-    "INVALIDATED_DEFECT": "❌ INVALIDATED — implementation defect",
-    "INVALIDATED_ROUNDING": "⚠️ INVALIDATED — rounding/representation",
-    "INVALIDATED_AMBIGUOUS": "⚠️ INVALIDATED — ambiguous rule text",
-    "UNCOVERABLE": "◻️ UNCOVERABLE",
-    "UNTESTED": "◻️ UNTESTED",
-}
+STATUS_LABELS = {k: f"{v['icon']} {v['label'].upper()}" for k, v in STATUS_META.items()}
+
+st.markdown(
+    """
+    <style>
+    .block-container { padding-top: 1.6rem; max-width: 1200px; }
+    #MainMenu, footer { visibility: hidden; }
+
+    .uc04-hero {
+        background: linear-gradient(120deg, #16324f 0%, #1c4a7a 55%, #2a6fa8 100%);
+        border-radius: 16px;
+        padding: 1.8rem 2.2rem;
+        color: #f4f8fc;
+        margin-bottom: 1.4rem;
+        box-shadow: 0 6px 20px rgba(20,40,70,0.18);
+    }
+    .uc04-hero h1 { margin: 0 0 .35rem 0; font-size: 1.7rem; font-weight: 700; color: #ffffff; }
+    .uc04-hero p { margin: 0; opacity: .88; font-size: .95rem; line-height: 1.45; }
+
+    .uc04-metric {
+        border-radius: 12px;
+        padding: 1rem 1.1rem;
+        background: #ffffff10;
+        border: 1px solid rgba(0,0,0,0.06);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+
+    div[data-testid="stMetric"] {
+        background: #ffffff;
+        border: 1px solid #eaecef;
+        border-radius: 12px;
+        padding: .9rem 1rem .6rem 1rem;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+    }
+    div[data-testid="stMetricLabel"] { font-weight: 600; opacity: .75; }
+
+    .rule-card {
+        border-radius: 12px;
+        border: 1px solid #eaecef;
+        border-left-width: 6px;
+        padding: .9rem 1.1rem;
+        margin-bottom: .6rem;
+        background: #ffffff;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.03);
+    }
+    .rule-card .rule-id { font-weight: 700; font-size: 1.02rem; letter-spacing: .02em; }
+    .rule-card .rule-statement { color: #333; margin: .15rem 0 .5rem 0; }
+    .status-pill {
+        display: inline-block; padding: .28rem .7rem; border-radius: 999px;
+        font-weight: 700; font-size: .8rem; letter-spacing: .01em;
+    }
+    .meta-row { font-size: .82rem; color: #666; margin-top: .35rem; }
+    .meta-row b { color: #333; }
+
+    /* --- Pin a light theme regardless of the browser/OS dark-mode setting.
+       Streamlit's dark theme drives almost everything through these CSS
+       variables, so overriding them at :root (not just individual
+       elements) is what actually stops black backgrounds / invisible
+       white-on-white text from reappearing. Belt-and-braces explicit
+       overrides on the concrete containers follow below. */
+    :root, .stApp {
+        --background-color: #ffffff !important;
+        --secondary-background-color: #f7f9fb !important;
+        --text-color: #14243a !important;
+        --primary-color: #d6402e !important;
+        color-scheme: light !important;
+    }
+
+    html, body,
+    .stApp,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stMain"],
+    [data-testid="stHeader"],
+    [data-testid="stBottomBlockContainer"],
+    .main {
+        background: #ffffff !important;
+        color: #14243a !important;
+    }
+
+    [data-testid="stAppViewContainer"] *,
+    [data-testid="stMain"] * {
+        color: #14243a !important;
+    }
+
+    section[data-testid="stSidebar"],
+    section[data-testid="stSidebar"] > div {
+        background: #f7f9fb !important;
+        color: #14243a !important;
+    }
+    section[data-testid="stSidebar"] * {
+        color: #14243a !important;
+    }
+    /* Buttons keep white text on their own colored fill. */
+    section[data-testid="stSidebar"] .stButton button,
+    [data-testid="stMain"] .stButton button {
+        color: #ffffff !important;
+    }
+    /* Don't force color on icon glyphs / svg fills, they carry their own. */
+    section[data-testid="stSidebar"] svg,
+    [data-testid="stMain"] svg {
+        color: inherit;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 @st.cache_resource
@@ -69,10 +174,18 @@ def run_scope(scope: str):
     raise ValueError(scope)
 
 
-st.title("UC-04 · From Validated Rules to Tested Code")
-st.caption(
-    "AI-assisted COBOL modernisation pipeline — test synthesis, implementation, "
-    "divergence diagnosis and evidence generation against a golden GnuCOBOL runtime."
+# ------------------------------------------------------------------ hero
+st.markdown(
+    """
+    <div class="uc04-hero">
+        <h1>🧪 UC-04 · From Validated Rules to Tested Code</h1>
+        <p>AI-assisted COBOL modernisation pipeline — synthesises tests straight from
+        SME-approved business rules, generates a Python reimplementation, diffs it against
+        a real, compiled GnuCOBOL oracle, and renders a rule-by-rule change-approval report:
+        exactly which rules are flawless, and which are flawed — and on which side.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
 VARIANT_OPTIONS = {
@@ -81,7 +194,7 @@ VARIANT_OPTIONS = {
 }
 
 with st.sidebar:
-    st.header("Run the pipeline")
+    st.markdown("### ⚙️ Run the pipeline")
     scope = st.selectbox("Scope", [
         "Full run (all 24 rules, all vectors)",
         "Happy flow (R-004..R-008, R-014, R-016, R-017)",
@@ -89,14 +202,15 @@ with st.sidebar:
         "Untraceable cap behaviour",
     ])
     st.divider()
-    st.subheader("Code variant")
+    st.markdown("### 🧬 Code variant")
     st.caption(
         "The two practical scenarios: run the SAME rules against the SAME "
-        "generated code, clean vs. with one real bug injected."
+        "generated code — clean vs. with one real bug injected."
     )
-    variant_label = st.radio("Generated implementation", list(VARIANT_OPTIONS.keys()))
+    variant_label = st.radio("Generated implementation", list(VARIANT_OPTIONS.keys()),
+                              label_visibility="collapsed")
     bug = VARIANT_OPTIONS[variant_label]
-    run_clicked = st.button("▶ Run", type="primary", use_container_width=True)
+    run_clicked = st.button("▶  Run pipeline", type="primary", use_container_width=True)
     st.divider()
     st.caption(
         "LLM mode: set in `ai_platform/config.yaml` (`llm.mode: mock|real`). "
@@ -117,7 +231,7 @@ if run_clicked:
 result = st.session_state.get("result")
 
 if result is None:
-    st.info("Choose a scope in the sidebar and click **Run** to execute the pipeline.")
+    st.info("👈 Choose a scope and code variant in the sidebar, then click **Run pipeline**.")
     st.stop()
 
 facts = result.facts
@@ -126,22 +240,39 @@ active_bug = st.session_state.get("bug")
 if active_bug:
     v = BUG_VARIANTS[active_bug]
     st.error(
-        f"**Bug injected: `{active_bug}`** — {v['description']} "
+        f"🐞 **Bug injected: `{active_bug}`** — {v['description']} "
         f"Expect **{v['rule_id']}** to show INVALIDATED below (flaw side: code)."
     )
 else:
-    st.success("**Clean generated code** — no bug injected. Rules with a real "
-               "divergence below are genuine ambiguous-rule, rounding, or "
-               "untraceable-behaviour findings, not implementation defects.")
+    st.success("✅ **Clean generated code** — no bug injected. Any real divergence below "
+               "is a genuine ambiguous-rule, rounding, or untraceable-behaviour finding, "
+               "not an implementation defect.")
 
+# --------------------------------------------------------------- metrics
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Rules validated (flawless)", facts.rules_validated)
-c2.metric("Rules invalidated (flaw found)", facts.rules_invalidated)
-c3.metric("Rules uncoverable / untested", facts.rules_uncoverable)
-c4.metric("Divergences", facts.total_divergences, f"over {facts.total_vectors} vectors")
+c1.metric("✅ Validated (flawless)", facts.rules_validated)
+c2.metric("❌ Invalidated (flaw found)", facts.rules_invalidated)
+c3.metric("◻️ Uncoverable / untested", facts.rules_uncoverable)
+c4.metric("🔍 Divergences", facts.total_divergences, f"over {facts.total_vectors} vectors")
 
-tabs = st.tabs(["Rule validation report", "Untraceable findings", "Evidence pack sections",
-                "Divergence gallery", "Links"])
+total_rules = facts.rules_validated + facts.rules_invalidated + facts.rules_uncoverable
+if total_rules:
+    st.progress(facts.rules_validated / total_rules,
+                text=f"{facts.rules_validated} of {total_rules} rules validated "
+                     f"({facts.rules_validated / total_rules:.0%})")
+
+status_counts = pd.Series([row.status for row in facts.traceability]).value_counts()
+chart_df = pd.DataFrame({
+    "status": [STATUS_META.get(s, {}).get("label", s) for s in status_counts.index],
+    "count": status_counts.values,
+})
+if not chart_df.empty:
+    st.bar_chart(chart_df.set_index("status"), horizontal=True, height=180)
+
+st.write("")
+
+tabs = st.tabs(["📋 Rule validation report", "🕵️ Untraceable findings", "📄 Evidence pack sections",
+                "🔬 Divergence gallery", "🔗 Links & downloads"])
 
 with tabs[0]:
     st.subheader("Every rule, validated or invalidated")
@@ -154,26 +285,35 @@ with tabs[0]:
         rows = [r for r in rows if r.status in status_filter]
 
     for row in rows:
-        color = STATUS_COLORS.get(row.status, "#fff")
-        with st.container(border=True):
-            cols = st.columns([1, 4, 3])
-            cols[0].markdown(f"**{row.rule_id}**")
-            cols[1].write(row.statement)
-            cols[2].markdown(
-                f"<div style='background:{color};padding:.3rem .6rem;border-radius:6px;"
-                f"font-weight:600;'>{STATUS_LABELS.get(row.status, row.status)}</div>",
-                unsafe_allow_html=True,
-            )
-            meta_cols = st.columns(3)
-            meta_cols[0].caption(f"Flaw side: **{row.flaw_side}**")
-            meta_cols[1].caption(f"Citing tests: {len(row.tests)}")
-            meta_cols[2].caption(f"Citing code: {', '.join(row.code_citations) or '—'}")
-            if row.diagnoses:
-                with st.expander(f"{len(row.diagnoses)} diagnosis(es)"):
-                    for d in row.diagnoses:
-                        st.markdown(f"- **{d.vector_id}** ({d.cause}): {d.explanation}")
-                        if d.fix_suggested:
-                            st.caption(f"  Suggested: {d.fix_suggested}")
+        meta = STATUS_META.get(row.status, {"bg": "#fff", "border": "#ccc", "text": "#333",
+                                             "icon": "•", "label": row.status})
+        st.markdown(
+            f"""
+            <div class="rule-card" style="border-left-color:{meta['border']};">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:1rem;">
+                    <div style="flex:1;">
+                        <span class="rule-id">{row.rule_id}</span>
+                        <div class="rule-statement">{row.statement}</div>
+                    </div>
+                    <span class="status-pill" style="background:{meta['bg']}; color:{meta['text']};">
+                        {meta['icon']} {meta['label'].upper()}
+                    </span>
+                </div>
+                <div class="meta-row">
+                    Flaw side: <b>{row.flaw_side}</b> &nbsp;·&nbsp;
+                    Citing tests: <b>{len(row.tests)}</b> &nbsp;·&nbsp;
+                    Citing code: <b>{', '.join(row.code_citations) or '—'}</b>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if row.diagnoses:
+            with st.expander(f"{len(row.diagnoses)} diagnosis(es) for {row.rule_id}"):
+                for d in row.diagnoses:
+                    st.markdown(f"- **{d.vector_id}** ({d.cause}): {d.explanation}")
+                    if d.fix_suggested:
+                        st.caption(f"  Suggested: {d.fix_suggested}")
 
 with tabs[1]:
     st.subheader("Code paths no rule describes")
@@ -194,7 +334,7 @@ with tabs[3]:
     for d in result.divergences[:50]:
         with st.expander(f"{d.vector_id} · field `{d.field}`: expected {d.expected!r}, got {d.actual!r}"):
             st.json({"input": d.input, "cobol_output": d.cobol_output,
-                     "python_output": d.python_output})
+                     "modern_output": d.modern_output})
     if len(result.divergences) > 50:
         st.caption(f"... and {len(result.divergences) - 50} more. See the HTML trace for all of them.")
 
@@ -202,11 +342,14 @@ with tabs[4]:
     st.write(f"HTML trace: `{result.trace_path}`")
     st.write(f"Evidence pack: `{result.evidence_path}`")
     try:
-        st.download_button("Download evidence pack (HTML)",
-                            data=Path(result.evidence_path).read_bytes(),
-                            file_name="evidence_pack.html", mime="text/html")
-        st.download_button("Download run trace (HTML)",
-                            data=Path(result.trace_path).read_bytes(),
-                            file_name=Path(result.trace_path).name, mime="text/html")
+        dl1, dl2 = st.columns(2)
+        dl1.download_button("⬇ Download evidence pack (HTML)",
+                             data=Path(result.evidence_path).read_bytes(),
+                             file_name="evidence_pack.html", mime="text/html",
+                             use_container_width=True)
+        dl2.download_button("⬇ Download run trace (HTML)",
+                             data=Path(result.trace_path).read_bytes(),
+                             file_name=Path(result.trace_path).name, mime="text/html",
+                             use_container_width=True)
     except Exception as exc:
         st.caption(f"(download unavailable: {exc})")

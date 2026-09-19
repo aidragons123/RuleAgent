@@ -24,8 +24,8 @@ def _classify(d: DivergenceRecord) -> tuple[str, str, str]:
     by the mock backend; in real mode the model does this reasoning
     instead, guided by ai/prompts/divergence.md."""
     cobol_capped = d.cobol_output.get("capped")
-    python_capped = d.python_output.get("capped")
-    if cobol_capped != python_capped or (
+    modern_capped = d.modern_output.get("capped")
+    if cobol_capped != modern_capped or (
         d.field == "interest" and cobol_capped == "Y"
     ):
         return (
@@ -104,7 +104,7 @@ class DivergenceAI(AILayer):
             "expected": divergence.expected,
             "actual": divergence.actual,
             "cobol_output": divergence.cobol_output,
-            "python_output": divergence.python_output,
+            "modern_output": divergence.modern_output,
             "rule_ids_json": divergence.rule_ids,
         }
 
@@ -125,7 +125,7 @@ class DivergenceAI(AILayer):
                 "confidence": 0.88,
                 "citations": citations,
                 "abstained": False,
-                "reasoning": "Heuristic classification over cobol_output vs python_output.",
+                "reasoning": "Heuristic classification over cobol_output vs modern_output.",
             }
 
         ctx["_mock"] = _mock

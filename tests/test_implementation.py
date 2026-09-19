@@ -1,7 +1,11 @@
 """tests/test_implementation.py - PRE-BUILT, do not modify.
-The generated module imports, honours the IO signature, and passes
-all 30 seed vectors. Every function carries a rule-id citation."""
-import importlib.util
+The generated Java class compiles, honours the IO signature, and
+passes all 30 seed vectors. Every method carries a rule-id citation.
+
+The generated implementation is compiled with javac and run as its
+own subprocess per vector (core/java_runner.py), over the same
+pipe-delimited wire protocol the COBOL oracle uses - never imported
+in-process, since it is a different language than the test harness."""
 import json
 from pathlib import Path
 
@@ -9,6 +13,7 @@ import pytest
 
 from ai.implementation import ImplementationAI
 from core.cobol_runner import run_oracle
+from core.java_runner import JavaGeneratedModule, compile_java
 from core.rules_loader import load_rules, load_signature
 
 RULES = load_rules()
@@ -22,17 +27,13 @@ def generated_module():
     result = ai.generate(RULES, SIG, tests=[])
     assert not result.abstained
     source = result.value
-    path = REPO_ROOT / "generated" / "_test_intcalc.py"
-    path.parent.mkdir(exist_ok=True)
-    path.write_text(source.content)
-    spec = importlib.util.spec_from_file_location("test_gen_intcalc", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    build_dir = compile_java(source)
+    module = JavaGeneratedModule(build_dir, SIG)
     module._citations = source.citations
     return module
 
 
-def test_module_imports_and_exposes_compute(generated_module):
+def test_module_exposes_compute(generated_module):
     assert hasattr(generated_module, "compute")
 
 
@@ -96,7 +97,7 @@ def test_year_pivot_matches_the_oracle_convention(generated_module):
         "adjustment_overpunch": "1234561A", "member_since_yy": "49",
         "member_since_mm": "06", "member_since_dd": "15",
     })
-    out_50 = generated_module.compute({**out_49, "member_since_yy": "50"} if False else {
+    out_50 = generated_module.compute({
         "account_id": "000004", "balance": "00000500.00",
         "adjustment_overpunch": "1234561A", "member_since_yy": "50",
         "member_since_mm": "06", "member_since_dd": "15",
