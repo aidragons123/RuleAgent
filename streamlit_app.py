@@ -31,15 +31,21 @@ st.set_page_config(
 )
 
 # ----------------------------------------------------------------- style
+# Fixed status palette (never themed / never reused for series color) —
+# good/warning/serious/critical, each shipped with an icon + label so the
+# status is never color-alone.
 STATUS_META = {
-    "VALIDATED":            {"bg": "#e9f9ee", "border": "#1e9e5a", "text": "#0f6b3c", "icon": "✅", "label": "Validated — flawless"},
-    "INVALIDATED_DEFECT":   {"bg": "#fdeceb", "border": "#d64545", "text": "#a02323", "icon": "❌", "label": "Invalidated — implementation defect"},
-    "INVALIDATED_ROUNDING": {"bg": "#fff6e0", "border": "#d99a1f", "text": "#8a6100", "icon": "⚠️", "label": "Invalidated — rounding / representation"},
-    "INVALIDATED_AMBIGUOUS":{"bg": "#fff6e0", "border": "#d99a1f", "text": "#8a6100", "icon": "⚠️", "label": "Invalidated — ambiguous rule text"},
-    "UNCOVERABLE":          {"bg": "#f2f2f4", "border": "#9a9aa2", "text": "#5a5a63", "icon": "◻️", "label": "Uncoverable"},
-    "UNTESTED":             {"bg": "#f2f2f4", "border": "#9a9aa2", "text": "#5a5a63", "icon": "◻️", "label": "Untested"},
+    "VALIDATED":            {"bg": "#e6f7e6", "border": "#0ca30c", "text": "#0a6b0a", "icon": "✅", "label": "Validated — flawless"},
+    "INVALIDATED_DEFECT":   {"bg": "#fbeaea", "border": "#d03b3b", "text": "#a52323", "icon": "❌", "label": "Invalidated — implementation defect"},
+    "INVALIDATED_ROUNDING": {"bg": "#fdf0ea", "border": "#ec835a", "text": "#a3502f", "icon": "⚠️", "label": "Invalidated — rounding / representation"},
+    "INVALIDATED_AMBIGUOUS":{"bg": "#fff6e0", "border": "#fab219", "text": "#8a6100", "icon": "❔", "label": "Invalidated — ambiguous rule text"},
+    "UNCOVERABLE":          {"bg": "#f0f0ee", "border": "#898781", "text": "#5a5952", "icon": "◻️", "label": "Uncoverable"},
+    "UNTESTED":             {"bg": "#f0f0ee", "border": "#898781", "text": "#5a5952", "icon": "◻️", "label": "Untested"},
 }
+STATUS_ORDER = ["VALIDATED", "INVALIDATED_DEFECT", "INVALIDATED_ROUNDING",
+                "INVALIDATED_AMBIGUOUS", "UNCOVERABLE", "UNTESTED"]
 STATUS_LABELS = {k: f"{v['icon']} {v['label'].upper()}" for k, v in STATUS_META.items()}
+ACCENT_BLUE = "#2a78d6"  # informational, not a status — used for neutral counts (e.g. divergences)
 
 st.markdown(
     """
@@ -76,22 +82,78 @@ st.markdown(
     div[data-testid="stMetricLabel"] { font-weight: 600; opacity: .75; }
 
     .rule-card {
-        border-radius: 12px;
+        border-radius: 14px;
         border: 1px solid #eaecef;
-        border-left-width: 6px;
-        padding: .9rem 1.1rem;
-        margin-bottom: .6rem;
+        border-left-width: 7px;
+        padding: 1rem 1.2rem;
+        margin-bottom: .7rem;
         background: #ffffff;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.03);
+        box-shadow: 0 2px 10px rgba(20,36,58,0.05);
+        transition: box-shadow .15s ease;
     }
-    .rule-card .rule-id { font-weight: 700; font-size: 1.02rem; letter-spacing: .02em; }
-    .rule-card .rule-statement { color: #333; margin: .15rem 0 .5rem 0; }
+    .rule-card:hover { box-shadow: 0 4px 16px rgba(20,36,58,0.10); }
+    .rule-card .rule-id { font-weight: 800; font-size: 1.08rem; letter-spacing: .02em; color: #14243a; }
+    .rule-card .rule-statement { color: #3a4453; margin: .2rem 0 .55rem 0; line-height: 1.45; }
     .status-pill {
-        display: inline-block; padding: .28rem .7rem; border-radius: 999px;
-        font-weight: 700; font-size: .8rem; letter-spacing: .01em;
+        display: inline-block; padding: .32rem .8rem; border-radius: 999px;
+        font-weight: 700; font-size: .78rem; letter-spacing: .02em; white-space: nowrap;
     }
-    .meta-row { font-size: .82rem; color: #666; margin-top: .35rem; }
-    .meta-row b { color: #333; }
+    .meta-row { font-size: .82rem; color: #6b7280; margin-top: .4rem; display:flex; gap:1.1rem; flex-wrap:wrap; }
+    .meta-row b { color: #14243a; }
+
+    /* ---------------------------------------------------------- KPI tiles */
+    .kpi-tile {
+        border-radius: 16px;
+        background: #ffffff;
+        border: 1px solid #eaecef;
+        border-top: 5px solid var(--accent, #2a78d6);
+        padding: 1.1rem 1.3rem 1rem;
+        box-shadow: 0 2px 10px rgba(20,36,58,0.05);
+        height: 100%;
+    }
+    .kpi-tile .kpi-icon { font-size: 1.3rem; line-height: 1; }
+    .kpi-tile .kpi-value { font-size: 2.3rem; font-weight: 800; color: #14243a; line-height: 1.15; margin-top: .25rem; }
+    .kpi-tile .kpi-label { font-size: .86rem; font-weight: 600; color: #5a6472; margin-top: .1rem; }
+    .kpi-tile .kpi-sub { font-size: .78rem; color: #8a94a1; margin-top: .2rem; }
+
+    /* --------------------------------------------- segmented status bar */
+    .status-bar-wrap { margin: .4rem 0 1.1rem; }
+    .status-bar {
+        display: flex; width: 100%; height: 34px; border-radius: 10px;
+        overflow: hidden; background: #f0f0ee; border: 1px solid #eaecef;
+    }
+    .status-bar-seg {
+        height: 100%; min-width: 3px;
+        border-right: 2px solid #ffffff;
+    }
+    .status-bar-seg:last-child { border-right: none; }
+    .status-legend {
+        display: flex; flex-wrap: wrap; gap: .5rem .9rem; margin-top: .7rem;
+    }
+    .status-legend-item {
+        display: flex; align-items: center; gap: .4rem;
+        font-size: .84rem; color: #3a4453; font-weight: 600;
+    }
+    .status-legend-swatch {
+        width: 11px; height: 11px; border-radius: 3px; display: inline-block;
+    }
+    .status-legend-count { color: #8a94a1; font-weight: 500; }
+
+    /* ------------------------------------------- divergence comparison */
+    .div-card {
+        border-radius: 14px; border: 1px solid #eaecef; background: #ffffff;
+        padding: .9rem 1.1rem; margin-bottom: .6rem; box-shadow: 0 1px 6px rgba(20,36,58,0.04);
+    }
+    .div-field-badge {
+        display:inline-block; background:#eef2f8; color:#14243a; font-weight:700;
+        font-size:.78rem; padding:.2rem .6rem; border-radius:6px; font-family: monospace;
+    }
+    .div-compare { display:flex; gap:.8rem; margin-top:.6rem; }
+    .div-box { flex:1; border-radius:10px; padding:.6rem .8rem; }
+    .div-box.expected { background:#e6f7e6; border:1px solid #0ca30c33; }
+    .div-box.actual { background:#fbeaea; border:1px solid #d03b3b33; }
+    .div-box .div-box-label { font-size:.72rem; font-weight:700; letter-spacing:.03em; text-transform:uppercase; opacity:.7; }
+    .div-box .div-box-value { font-size:1.15rem; font-weight:800; font-family: monospace; margin-top:.1rem; }
 
     /* --- Pin a light theme regardless of the browser/OS dark-mode setting.
        Streamlit's dark theme drives almost everything through these CSS
@@ -249,25 +311,63 @@ else:
                "not an implementation defect.")
 
 # --------------------------------------------------------------- metrics
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("✅ Validated (flawless)", facts.rules_validated)
-c2.metric("❌ Invalidated (flaw found)", facts.rules_invalidated)
-c3.metric("◻️ Uncoverable / untested", facts.rules_uncoverable)
-c4.metric("🔍 Divergences", facts.total_divergences, f"over {facts.total_vectors} vectors")
+def kpi_tile(icon: str, value, label: str, accent: str, sub: str = "") -> str:
+    sub_html = f'<div class="kpi-sub">{sub}</div>' if sub else ""
+    return f"""
+    <div class="kpi-tile" style="--accent:{accent};">
+        <div class="kpi-icon">{icon}</div>
+        <div class="kpi-value">{value}</div>
+        <div class="kpi-label">{label}</div>
+        {sub_html}
+    </div>
+    """
 
 total_rules = facts.rules_validated + facts.rules_invalidated + facts.rules_uncoverable
+pct = f"{facts.rules_validated / total_rules:.0%}" if total_rules else "—"
+
+k1, k2, k3, k4 = st.columns(4)
+k1.markdown(kpi_tile("✅", facts.rules_validated, "Validated — flawless",
+                      STATUS_META["VALIDATED"]["border"]), unsafe_allow_html=True)
+k2.markdown(kpi_tile("❌", facts.rules_invalidated, "Invalidated — flaw found",
+                      STATUS_META["INVALIDATED_DEFECT"]["border"]), unsafe_allow_html=True)
+k3.markdown(kpi_tile("◻️", facts.rules_uncoverable, "Uncoverable / untested",
+                      STATUS_META["UNCOVERABLE"]["border"]), unsafe_allow_html=True)
+k4.markdown(kpi_tile("🔍", facts.total_divergences, "Divergences found", ACCENT_BLUE,
+                      sub=f"over {facts.total_vectors} test vectors"), unsafe_allow_html=True)
+
+st.write("")
+
 if total_rules:
     st.progress(facts.rules_validated / total_rules,
-                text=f"{facts.rules_validated} of {total_rules} rules validated "
-                     f"({facts.rules_validated / total_rules:.0%})")
+                text=f"**{facts.rules_validated} of {total_rules} rules validated ({pct})**")
 
+# ------------------------------------------------- segmented status bar
 status_counts = pd.Series([row.status for row in facts.traceability]).value_counts()
-chart_df = pd.DataFrame({
-    "status": [STATUS_META.get(s, {}).get("label", s) for s in status_counts.index],
-    "count": status_counts.values,
-})
-if not chart_df.empty:
-    st.bar_chart(chart_df.set_index("status"), horizontal=True, height=180)
+counts_by_status = {s: int(status_counts.get(s, 0)) for s in STATUS_ORDER}
+total_for_bar = sum(counts_by_status.values())
+
+if total_for_bar:
+    segments_html = "".join(
+        f'<div class="status-bar-seg" title="{STATUS_META[s]["label"]}: {n}" '
+        f'style="width:{n / total_for_bar * 100:.3f}%; background:{STATUS_META[s]["border"]};"></div>'
+        for s, n in counts_by_status.items() if n > 0
+    )
+    legend_html = "".join(
+        f'<span class="status-legend-item">'
+        f'<span class="status-legend-swatch" style="background:{STATUS_META[s]["border"]};"></span>'
+        f'{STATUS_META[s]["icon"]} {STATUS_META[s]["label"]} '
+        f'<span class="status-legend-count">({n})</span></span>'
+        for s, n in counts_by_status.items() if n > 0
+    )
+    st.markdown(
+        f"""
+        <div class="status-bar-wrap">
+            <div class="status-bar">{segments_html}</div>
+            <div class="status-legend">{legend_html}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 st.write("")
 
@@ -331,8 +431,29 @@ with tabs[2]:
 
 with tabs[3]:
     st.subheader("Divergence gallery")
+    st.caption("Every field-level disagreement between the compiled COBOL oracle and the "
+               "generated modern code, for every test vector run.")
     for d in result.divergences[:50]:
-        with st.expander(f"{d.vector_id} · field `{d.field}`: expected {d.expected!r}, got {d.actual!r}"):
+        st.markdown(
+            f"""
+            <div class="div-card">
+                <span class="div-field-badge">{d.vector_id}</span>
+                &nbsp; field <span class="div-field-badge">{d.field}</span>
+                <div class="div-compare">
+                    <div class="div-box expected">
+                        <div class="div-box-label">🗄️ COBOL (expected)</div>
+                        <div class="div-box-value">{d.expected!r}</div>
+                    </div>
+                    <div class="div-box actual">
+                        <div class="div-box-label">☕ Modern code (actual)</div>
+                        <div class="div-box-value">{d.actual!r}</div>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        with st.expander("Full input / output for this vector"):
             st.json({"input": d.input, "cobol_output": d.cobol_output,
                      "modern_output": d.modern_output})
     if len(result.divergences) > 50:
