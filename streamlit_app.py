@@ -372,7 +372,7 @@ if total_for_bar:
 st.write("")
 
 tabs = st.tabs(["📋 Rule validation report", "🕵️ Untraceable findings", "📄 Evidence pack sections",
-                "🔬 Divergence gallery", "🔗 Links & downloads"])
+                "🔬 Divergence gallery", "🧑‍💻 Source code", "🔗 Links & downloads"])
 
 with tabs[0]:
     st.subheader("Every rule, validated or invalidated")
@@ -460,6 +460,39 @@ with tabs[3]:
         st.caption(f"... and {len(result.divergences) - 50} more. See the HTML trace for all of them.")
 
 with tabs[4]:
+    st.subheader("Legacy code, business rules, and the AI-generated replacement")
+    st.caption("Shown live from disk — the Java below is exactly what this run just "
+               "compiled and tested, not a canned example.")
+
+    root = Path(__file__).resolve().parent
+    src_choice = st.radio(
+        "Pick a file to view",
+        [
+            "🗄️ Legacy COBOL (data/src/legacy/INTCALC.cbl)",
+            "📜 SME-approved rules (data/rules/validated_rules.yaml)",
+            "☕ AI-generated modern code (generated/GeneratedIntcalc.java)",
+        ],
+        horizontal=False,
+    )
+
+    def show_source(path: Path, language: str):
+        if not path.exists():
+            st.warning(f"`{path.relative_to(root)}` not found yet — run the pipeline first.")
+            return
+        st.code(path.read_text(), language=language, line_numbers=True)
+
+    if src_choice.startswith("🗄️"):
+        show_source(root / "data" / "src" / "legacy" / "INTCALC.cbl", "cobol")
+    elif src_choice.startswith("📜"):
+        show_source(root / "data" / "rules" / "validated_rules.yaml", "yaml")
+    else:
+        show_source(root / "generated" / "GeneratedIntcalc.java", "java")
+        st.caption("This file is regenerated fresh on every run and is intentionally "
+                   "**not** committed to git — it's disposable AI output, not a trusted "
+                   "static artifact. The legacy COBOL and the rules file, by contrast, "
+                   "are permanent and version-controlled.")
+
+with tabs[5]:
     st.write(f"HTML trace: `{result.trace_path}`")
     st.write(f"Evidence pack: `{result.evidence_path}`")
     try:
