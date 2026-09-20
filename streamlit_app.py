@@ -24,7 +24,7 @@ from ai.implementation import BUG_VARIANTS  # noqa: E402
 from core.pipeline import Pipeline, load_heldback_vectors, load_seed_vectors  # noqa: E402
 
 st.set_page_config(
-    page_title="UC-04 · From Validated Rules to Tested Code",
+    page_title="RuleAgent · UC-04 — From Validated Rules to Tested Code",
     page_icon="🧪",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -63,6 +63,11 @@ st.markdown(
     }
     .uc04-hero h1 { margin: 0 0 .35rem 0; font-size: 1.7rem; font-weight: 700; color: #ffffff; }
     .uc04-hero p { margin: 0; opacity: .88; font-size: .95rem; line-height: 1.45; }
+    .uc04-hero-badge {
+        display: inline-block; background: #ffffff22; border: 1px solid #ffffff55;
+        color: #d7e6f5; font-weight: 800; font-size: .74rem; letter-spacing: .08em;
+        padding: .25rem .65rem; border-radius: 999px; margin-bottom: .6rem;
+    }
 
     .uc04-metric {
         border-radius: 12px;
@@ -185,18 +190,59 @@ st.markdown(
         color: #14243a !important;
     }
 
+    /* ---------------------------------------------------- colored sidebar */
     section[data-testid="stSidebar"],
     section[data-testid="stSidebar"] > div {
-        background: #f7f9fb !important;
-        color: #14243a !important;
+        background: linear-gradient(180deg, #0f2038 0%, #16324f 55%, #1c3f63 100%) !important;
+        color: #eaf1fa !important;
     }
     section[data-testid="stSidebar"] * {
+        color: #eaf1fa !important;
+    }
+    section[data-testid="stSidebar"] h3 {
+        font-weight: 800 !important; letter-spacing: .01em;
+    }
+    section[data-testid="stSidebar"] hr {
+        border-color: #ffffff2a !important;
+    }
+    /* Card-grouped sections (st.container(border=True)) inside the sidebar */
+    section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
+        background: #ffffff0f !important;
+        border: 1px solid #ffffff26 !important;
+        border-left: 4px solid #4f9ce8 !important;
+        border-radius: 12px !important;
+        padding: .3rem .4rem !important;
+        margin-bottom: .9rem !important;
+    }
+    /* Slight color variety between the two sidebar sections */
+    section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(2) {
+        border-left-color: #e0729c !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(3) {
+        border-left-color: #f0b23e !important;
+    }
+    /* The scope dropdown reads better as a light control against the dark panel */
+    section[data-testid="stSidebar"] [data-baseweb="select"] > div {
+        background: #ffffff !important;
+        border-radius: 8px !important;
+        border: 1px solid #ffffff40 !important;
+    }
+    section[data-testid="stSidebar"] [data-baseweb="select"] * {
         color: #14243a !important;
+    }
+    section[data-testid="stSidebar"] .stCaption, section[data-testid="stSidebar"] small {
+        color: #b9cbe0 !important;
+    }
+    section[data-testid="stSidebar"] code {
+        background: #ffffff1a !important; color: #d7e6f5 !important;
     }
     /* Buttons keep white text on their own colored fill. */
     section[data-testid="stSidebar"] .stButton button,
     [data-testid="stMain"] .stButton button {
         color: #ffffff !important;
+        background: linear-gradient(120deg, #e0503a 0%, #d6402e 100%) !important;
+        border: none !important;
+        font-weight: 700 !important;
     }
     /* Don't force color on icon glyphs / svg fills, they carry their own. */
     section[data-testid="stSidebar"] svg,
@@ -240,10 +286,11 @@ def run_scope(scope: str):
 st.markdown(
     """
     <div class="uc04-hero">
-        <h1>🧪 UC-04 · From Validated Rules to Tested Code</h1>
+        <div class="uc04-hero-badge">UC-04</div>
+        <h1>🧪 RuleAgent — From Validated Rules to Tested Code</h1>
         <p>AI-assisted COBOL modernisation pipeline — synthesises tests straight from
-        SME-approved business rules, generates a Python reimplementation, diffs it against
-        a real, compiled GnuCOBOL oracle, and renders a rule-by-rule change-approval report:
+        SME-approved business rules, generates a real compiled Java reimplementation, diffs it
+        against a real, compiled GnuCOBOL oracle, and renders a rule-by-rule change-approval report:
         exactly which rules are flawless, and which are flawed — and on which side.</p>
     </div>
     """,
@@ -256,28 +303,36 @@ VARIANT_OPTIONS = {
 }
 
 with st.sidebar:
-    st.markdown("### ⚙️ Run the pipeline")
-    scope = st.selectbox("Scope", [
-        "Full run (all 24 rules, all vectors)",
-        "Happy flow (R-004..R-008, R-014, R-016, R-017)",
-        "Rounding (R-009)",
-        "Untraceable cap behaviour",
-    ])
-    st.divider()
-    st.markdown("### 🧬 Code variant")
-    st.caption(
-        "The two practical scenarios: run the SAME rules against the SAME "
-        "generated code — clean vs. with one real bug injected."
-    )
-    variant_label = st.radio("Generated implementation", list(VARIANT_OPTIONS.keys()),
-                              label_visibility="collapsed")
-    bug = VARIANT_OPTIONS[variant_label]
+    st.markdown("## 🧪 RuleAgent")
+    st.caption("UC-04 · From Validated Rules to Tested Code")
+    st.write("")
+
+    with st.container(border=True):
+        st.markdown("#### ⚙️ Scope")
+        scope = st.selectbox("Scope", [
+            "Full run (all 24 rules, all vectors)",
+            "Happy flow (R-004..R-008, R-014, R-016, R-017)",
+            "Rounding (R-009)",
+            "Untraceable cap behaviour",
+        ], label_visibility="collapsed")
+
+    with st.container(border=True):
+        st.markdown("#### 🧬 Code variant")
+        st.caption(
+            "Run the SAME rules against the SAME generated code — "
+            "clean vs. with one real bug injected."
+        )
+        variant_label = st.radio("Generated implementation", list(VARIANT_OPTIONS.keys()),
+                                  label_visibility="collapsed")
+        bug = VARIANT_OPTIONS[variant_label]
+
     run_clicked = st.button("▶  Run pipeline", type="primary", use_container_width=True)
-    st.divider()
-    st.caption(
-        "LLM mode: set in `ai_platform/config.yaml` (`llm.mode: mock|real`). "
-        "Mock mode (default) is fully offline and deterministic — no API key needed."
-    )
+
+    with st.container(border=True):
+        st.caption(
+            "🔧 **LLM mode**: set in `ai_platform/config.yaml` (`llm.mode: mock|real`). "
+            "Mock mode (default) is fully offline and deterministic — no API key needed."
+        )
 
 if run_clicked:
     if bug:
