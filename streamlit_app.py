@@ -187,6 +187,24 @@ st.markdown(
         color: #14243a !important;
     }
 
+    /* Source-code viewer (st.code): dark background, white text — this
+       overrides the global dark-text rule above, which otherwise made
+       code unreadable (dark text on the code block's own dark background). */
+    [data-testid="stCode"] {
+        background: #1e1e2e !important;
+        border-radius: 10px !important;
+    }
+    [data-testid="stCode"] pre,
+    [data-testid="stCode"] code,
+    [data-testid="stCode"] span,
+    [data-testid="stCode"] * {
+        color: #ffffff !important;
+        background: transparent !important;
+    }
+    [data-testid="stCode"] .linenumber {
+        color: #9aa0ab !important;
+    }
+
     /* ---------------------------------------------------- colored sidebar */
     section[data-testid="stSidebar"],
     section[data-testid="stSidebar"] > div {
