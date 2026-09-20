@@ -372,16 +372,37 @@ with st.sidebar:
             "Mock mode (default) is fully offline and deterministic — no API key needed."
         )
 
+import datetime as _dt
+
 if run_clicked:
+    # Keep the run this button-click is about to replace, so a "compare
+    # with previous run" view is possible without re-running anything.
+    if st.session_state.get("result") is not None:
+        st.session_state["prev_result"] = st.session_state["result"]
+        st.session_state["prev_label"] = st.session_state.get("run_label", "previous run")
+
     if bug:
         os.environ["UC04_INJECT_BUG"] = bug
     else:
         os.environ.pop("UC04_INJECT_BUG", None)
     with st.spinner(f"Running: {scope} ({'clean' if not bug else bug})..."):
-        st.session_state["result"] = run_scope(scope)
+        new_result = run_scope(scope)
+        st.session_state["result"] = new_result
         st.session_state["scope"] = scope
         st.session_state["bug"] = bug
+        run_label = f"{scope_key} · {variant_key}"
+        st.session_state["run_label"] = run_label
     os.environ.pop("UC04_INJECT_BUG", None)
+
+    st.session_state.setdefault("run_history", []).append({
+        "Time": _dt.datetime.now().strftime("%H:%M:%S"),
+        "Scope": scope_key,
+        "Code variant": variant_key,
+        "Validated": new_result.facts.rules_validated,
+        "Invalidated": new_result.facts.rules_invalidated,
+        "Uncoverable/Untested": new_result.facts.rules_uncoverable,
+        "Divergences": new_result.facts.total_divergences,
+    })
 
 result = st.session_state.get("result")
 
@@ -464,7 +485,8 @@ if total_for_bar:
 
 st.write("")
 
-tabs = st.tabs(["📋 Rule validation report", "🕵️ Untraceable findings", "📄 Evidence pack sections",
+tabs = st.tabs(["📋 Rule validation report", "🧾 Test vectors", "🔀 Compare runs",
+                "🕘 Run history", "🕵️ Untraceable findings", "📄 Evidence pack sections",
                 "🔬 Divergence gallery", "🧑‍💻 Source code", "🔗 Links & downloads"])
 
 with tabs[0]:
@@ -509,6 +531,77 @@ with tabs[0]:
                         st.caption(f"  Suggested: {d.fix_suggested}")
 
 with tabs[1]:
+    st.subheader("Every test vector used in this run")
+    st.caption(
+        "The actual inputs fed to both the COBOL oracle and the generated code — "
+        "before any pass/fail judgment is applied. Proof the test data is real "
+        "and varied, not cherry-picked."
+    )
+    vec_rows = []
+    diverged_ids = {d.vector_id for d in result.divergences}
+    for v in result.vectors:
+        row = {"Vector ID": v.id, "Origin": v.origin.replace("_", " "),
+               "Rule(s)": ", ".join(v.rule_ids) or "—",
+               "Diverged?": "⚠️ yes" if v.id in diverged_ids else "no"}
+        row.update(v.input)
+        vec_rows.append(row)
+    if vec_rows:
+        st.dataframe(pd.DataFrame(vec_rows), use_container_width=True, hide_index=True)
+        st.caption(f"{len(vec_rows)} vectors total.")
+    else:
+        st.info("No test vectors recorded for this run.")
+
+with tabs[2]:
+    st.subheader("Compare this run with the previous one")
+    prev = st.session_state.get("prev_result")
+    if prev is None:
+        st.info(
+            "No previous run yet this session. Run the pipeline once (e.g. **Clean**), "
+            "then change the code variant and run again — this tab will show both "
+            "runs side by side."
+        )
+    else:
+        prev_label = st.session_state.get("prev_label", "Previous run")
+        curr_label = st.session_state.get("run_label", "Current run")
+        cprev, ccurr = st.columns(2)
+        for col, label, r in [(cprev, prev_label, prev), (ccurr, curr_label, result)]:
+            with col:
+                st.markdown(f"**{label}**")
+                f = r.facts
+                st.markdown(
+                    f"✅ Validated: **{f.rules_validated}** &nbsp;·&nbsp; "
+                    f"❌ Invalidated: **{f.rules_invalidated}** &nbsp;·&nbsp; "
+                    f"◻️ Uncoverable/Untested: **{f.rules_uncoverable}** &nbsp;·&nbsp; "
+                    f"🔍 Divergences: **{f.total_divergences}**"
+                )
+        st.divider()
+        st.markdown("#### Rules whose status changed")
+        prev_by_id = {row.rule_id: row for row in prev.facts.traceability}
+        curr_by_id = {row.rule_id: row for row in result.facts.traceability}
+        changed = []
+        for rid, curr_row in curr_by_id.items():
+            prev_row = prev_by_id.get(rid)
+            if prev_row and prev_row.status != curr_row.status:
+                changed.append({
+                    "Rule": rid,
+                    f"{prev_label}": STATUS_META.get(prev_row.status, {}).get("label", prev_row.status),
+                    f"{curr_label}": STATUS_META.get(curr_row.status, {}).get("label", curr_row.status),
+                })
+        if changed:
+            st.dataframe(pd.DataFrame(changed), use_container_width=True, hide_index=True)
+        else:
+            st.success("No rule changed status between these two runs.")
+
+with tabs[3]:
+    st.subheader("Run history (this session)")
+    history = st.session_state.get("run_history", [])
+    if not history:
+        st.info("No runs recorded yet.")
+    else:
+        st.dataframe(pd.DataFrame(history), use_container_width=True, hide_index=True)
+        st.caption(f"{len(history)} run(s) this session. Cleared when the app restarts.")
+
+with tabs[4]:
     st.subheader("Code paths no rule describes")
     if not facts.untraceable_findings:
         st.success("None found in this run's vector set.")
@@ -516,13 +609,13 @@ with tabs[1]:
         st.warning(f"**{f.id}**: {f.description}")
         st.caption(f"Triggering vectors: {', '.join(f.triggering_vectors)}")
 
-with tabs[2]:
+with tabs[5]:
     st.subheader("Change-approval evidence pack sections")
     for kind, text in result.sections.items():
         st.markdown(f"**{kind.replace('_', ' ').title()}**")
         st.write(text)
 
-with tabs[3]:
+with tabs[6]:
     st.subheader("Divergence gallery")
     st.caption("Every field-level disagreement between the compiled COBOL oracle and the "
                "generated modern code, for every test vector run.")
@@ -552,7 +645,7 @@ with tabs[3]:
     if len(result.divergences) > 50:
         st.caption(f"... and {len(result.divergences) - 50} more. See the HTML trace for all of them.")
 
-with tabs[4]:
+with tabs[7]:
     st.subheader("Legacy code, business rules, and the AI-generated replacement")
     st.caption("Shown live from disk — the Java below is exactly what this run just "
                "compiled and tested, not a canned example.")
@@ -585,7 +678,7 @@ with tabs[4]:
                    "static artifact. The legacy COBOL and the rules file, by contrast, "
                    "are permanent and version-controlled.")
 
-with tabs[5]:
+with tabs[8]:
     st.write(f"HTML trace: `{result.trace_path}`")
     st.write(f"Evidence pack: `{result.evidence_path}`")
     try:
