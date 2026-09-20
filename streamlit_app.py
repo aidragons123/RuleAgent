@@ -24,8 +24,8 @@ from ai.implementation import BUG_VARIANTS  # noqa: E402
 from core.pipeline import Pipeline, load_heldback_vectors, load_seed_vectors  # noqa: E402
 
 st.set_page_config(
-    page_title="RuleAgent · UC-04 — From Validated Rules to Tested Code",
-    page_icon="🧪",
+    page_title="CodeVerus — From Legacy COBOL to Verified Modern Code",
+    page_icon="⚖️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -45,7 +45,7 @@ STATUS_META = {
 STATUS_ORDER = ["VALIDATED", "INVALIDATED_DEFECT", "INVALIDATED_ROUNDING",
                 "INVALIDATED_AMBIGUOUS", "UNCOVERABLE", "UNTESTED"]
 STATUS_LABELS = {k: f"{v['icon']} {v['label'].upper()}" for k, v in STATUS_META.items()}
-ACCENT_BLUE = "#2a78d6"  # informational, not a status — used for neutral counts (e.g. divergences)
+ACCENT_NEUTRAL = "#7c56d6"  # informational, not a status — used for neutral counts (e.g. divergences)
 
 st.markdown(
     """
@@ -54,20 +54,17 @@ st.markdown(
     #MainMenu, footer { visibility: hidden; }
 
     .uc04-hero {
-        background: linear-gradient(120deg, #16324f 0%, #1c4a7a 55%, #2a6fa8 100%);
-        border-radius: 16px;
-        padding: 1.8rem 2.2rem;
-        color: #f4f8fc;
+        background: #ffffff;
+        border: 1px solid #e6e8eb;
+        border-left: 5px solid #14243a;
+        border-radius: 14px;
+        padding: 1.7rem 2.1rem;
+        color: #14243a;
         margin-bottom: 1.4rem;
-        box-shadow: 0 6px 20px rgba(20,40,70,0.18);
+        box-shadow: 0 2px 12px rgba(20,36,58,0.06);
     }
-    .uc04-hero h1 { margin: 0 0 .35rem 0; font-size: 1.7rem; font-weight: 700; color: #ffffff; }
-    .uc04-hero p { margin: 0; opacity: .88; font-size: .95rem; line-height: 1.45; }
-    .uc04-hero-badge {
-        display: inline-block; background: #ffffff22; border: 1px solid #ffffff55;
-        color: #d7e6f5; font-weight: 800; font-size: .74rem; letter-spacing: .08em;
-        padding: .25rem .65rem; border-radius: 999px; margin-bottom: .6rem;
-    }
+    .uc04-hero h1 { margin: 0 0 .35rem 0; font-size: 1.6rem; font-weight: 800; color: #14243a; }
+    .uc04-hero p { margin: 0; color: #4a5568; font-size: .95rem; line-height: 1.5; }
 
     .uc04-metric {
         border-radius: 12px;
@@ -193,11 +190,11 @@ st.markdown(
     /* ---------------------------------------------------- colored sidebar */
     section[data-testid="stSidebar"],
     section[data-testid="stSidebar"] > div {
-        background: linear-gradient(180deg, #0f2038 0%, #16324f 55%, #1c3f63 100%) !important;
-        color: #eaf1fa !important;
+        background: linear-gradient(180deg, #1c2128 0%, #262c35 55%, #2f3542 100%) !important;
+        color: #eef0f3 !important;
     }
     section[data-testid="stSidebar"] * {
-        color: #eaf1fa !important;
+        color: #eef0f3 !important;
     }
     section[data-testid="stSidebar"] h3 {
         font-weight: 800 !important; letter-spacing: .01em;
@@ -209,17 +206,17 @@ st.markdown(
     section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
         background: #ffffff0f !important;
         border: 1px solid #ffffff26 !important;
-        border-left: 4px solid #4f9ce8 !important;
+        border-left: 4px solid #f0b23e !important;
         border-radius: 12px !important;
         padding: .3rem .4rem !important;
         margin-bottom: .9rem !important;
     }
-    /* Slight color variety between the two sidebar sections */
+    /* Slight color variety between the sidebar sections — no blue */
     section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(2) {
         border-left-color: #e0729c !important;
     }
     section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(3) {
-        border-left-color: #f0b23e !important;
+        border-left-color: #8b6fd1 !important;
     }
     /* The scope dropdown reads better as a light control against the dark panel */
     section[data-testid="stSidebar"] [data-baseweb="select"] > div {
@@ -286,45 +283,68 @@ def run_scope(scope: str):
 st.markdown(
     """
     <div class="uc04-hero">
-        <div class="uc04-hero-badge">UC-04</div>
-        <h1>🧪 RuleAgent — From Validated Rules to Tested Code</h1>
-        <p>AI-assisted COBOL modernisation pipeline — synthesises tests straight from
-        SME-approved business rules, generates a real compiled Java reimplementation, diffs it
-        against a real, compiled GnuCOBOL oracle, and renders a rule-by-rule change-approval report:
-        exactly which rules are flawless, and which are flawed — and on which side.</p>
+        <h1>CodeVerus — From Legacy COBOL to Verified Modern Code</h1>
+        <p>Takes a legacy COBOL program, generates a real, compiled Java replacement for it,
+        and validates that replacement against SME-approved business rules — producing a
+        rule-by-rule report of exactly which rules are flawless, and which are flawed, and on
+        which side.</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
+SCOPE_OPTIONS = {
+    "Full run": {
+        "value": "Full run (all 24 rules, all vectors)",
+        "help": "Every one of the 24 rules, checked against every test vector.",
+    },
+    "Happy flow": {
+        "value": "Happy flow (R-004..R-008, R-014, R-016, R-017)",
+        "help": "Just the tiered-interest rate rules (R-004–R-008, R-014, R-016, R-017).",
+    },
+    "Rounding only": {
+        "value": "Rounding (R-009)",
+        "help": "Just R-009, the interest-rounding rule.",
+    },
+    "Untraceable cap behaviour": {
+        "value": "Untraceable cap behaviour",
+        "help": "A code path no rule describes — shows the agent's honesty guardrail.",
+    },
+}
+
 VARIANT_OPTIONS = {
-    "✅ Clean (code generated properly)": None,
-    **{f"❌ Bug injected: {v['description']}": key for key, v in BUG_VARIANTS.items()},
+    "Clean": {"value": None, "help": "Code generated correctly — no bug injected."},
+    **{
+        f"Bug: {v['rule_id']}": {"value": key, "help": v["description"]}
+        for key, v in BUG_VARIANTS.items()
+    },
 }
 
 with st.sidebar:
-    st.markdown("## 🧪 RuleAgent")
-    st.caption("UC-04 · From Validated Rules to Tested Code")
+    st.markdown("## CodeVerus")
+    st.caption("AI COBOL modernization & rule validation")
     st.write("")
 
     with st.container(border=True):
-        st.markdown("#### ⚙️ Scope")
-        scope = st.selectbox("Scope", [
-            "Full run (all 24 rules, all vectors)",
-            "Happy flow (R-004..R-008, R-014, R-016, R-017)",
-            "Rounding (R-009)",
-            "Untraceable cap behaviour",
-        ], label_visibility="collapsed")
+        st.markdown("#### 1. Choose what to test")
+        scope_key = st.selectbox(
+            "Scope", list(SCOPE_OPTIONS.keys()), label_visibility="collapsed",
+        )
+        scope = SCOPE_OPTIONS[scope_key]["value"]
+        st.caption(SCOPE_OPTIONS[scope_key]["help"])
 
     with st.container(border=True):
-        st.markdown("#### 🧬 Code variant")
+        st.markdown("#### 2. Choose the code to check")
         st.caption(
-            "Run the SAME rules against the SAME generated code — "
-            "clean vs. with one real bug injected."
+            "Run the same rules against the same generated code — clean, "
+            "or with one real bug injected on purpose."
         )
-        variant_label = st.radio("Generated implementation", list(VARIANT_OPTIONS.keys()),
-                                  label_visibility="collapsed")
-        bug = VARIANT_OPTIONS[variant_label]
+        variant_key = st.radio(
+            "Generated implementation", list(VARIANT_OPTIONS.keys()),
+            label_visibility="collapsed",
+        )
+        bug = VARIANT_OPTIONS[variant_key]["value"]
+        st.caption(f"→ {VARIANT_OPTIONS[variant_key]['help']}")
 
     run_clicked = st.button("▶  Run pipeline", type="primary", use_container_width=True)
 
@@ -387,7 +407,7 @@ k2.markdown(kpi_tile("❌", facts.rules_invalidated, "Invalidated — flaw found
                       STATUS_META["INVALIDATED_DEFECT"]["border"]), unsafe_allow_html=True)
 k3.markdown(kpi_tile("◻️", facts.rules_uncoverable, "Uncoverable / untested",
                       STATUS_META["UNCOVERABLE"]["border"]), unsafe_allow_html=True)
-k4.markdown(kpi_tile("🔍", facts.total_divergences, "Divergences found", ACCENT_BLUE,
+k4.markdown(kpi_tile("🔍", facts.total_divergences, "Divergences found", ACCENT_NEUTRAL,
                       sub=f"over {facts.total_vectors} test vectors"), unsafe_allow_html=True)
 
 st.write("")
