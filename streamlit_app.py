@@ -11,8 +11,13 @@ Run with: streamlit run streamlit_app.py   (or `make ui`)
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
@@ -20,8 +25,14 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import core.differential as _differential  # noqa: E402
+import core.pipeline as _pipeline_mod  # noqa: E402
 from ai.implementation import BUG_VARIANTS  # noqa: E402
+from ai_platform.tracer import Tracer as _Tracer  # noqa: E402
+from core import cobol_runner as _cobol_runner  # noqa: E402
+from core.java_runner import JavaGeneratedModule, JavaRunnerError  # noqa: E402
 from core.pipeline import Pipeline, load_heldback_vectors, load_seed_vectors  # noqa: E402
+from core.rules_loader import load_signature  # noqa: E402
 
 st.set_page_config(
     page_title="CodeVerus — From Legacy COBOL to Verified Modern Code",
@@ -243,7 +254,12 @@ st.markdown(
         border: 1px solid #ffffff40 !important;
     }
     section[data-testid="stSidebar"] [data-baseweb="select"] * {
-        color: #14243a !important;
+        color: #000000 !important;
+    }
+    /* The open option list is rendered in a portal outside the sidebar */
+    [data-baseweb="popover"] [role="listbox"],
+    [data-baseweb="popover"] [role="listbox"] * {
+        color: #000000 !important;
     }
     section[data-testid="stSidebar"] .stCaption, section[data-testid="stSidebar"] small {
         color: #b9cbe0 !important;
@@ -268,6 +284,256 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+# ------------------------------------------------------------- fast path
+# The differential step is what makes a run slow: core/differential.py walks
+# the vectors one at a time, and each one launches a COBOL process (~55 ms)
+# and a fresh JVM (~110 ms) — ~50 s for a 279-vector full run. core/ is
+# write-locked (`make verify` checksums everything outside ai/), so the
+# speed-ups live here instead. Three of them, none of which changes a single
+# computed value:
+#
+#   1. The generated Java runs ALL vectors through ONE JVM (see the batch
+#      runner below) instead of one JVM per vector.
+#   2. The COBOL oracle cannot be batched — INTCALC.cbl does ACCEPT ...
+#      STOP RUN, one line per process, and the file is checksum-locked — so
+#      its outputs are memoised to disk instead, keyed by the hash of the
+#      compiled binary. The values still come from real oracle runs; they
+#      are just not recomputed once the same binary has already answered the
+#      same input. A rebuilt INTCALC.cbl changes the hash and voids the file.
+#   3. javac is memoised on the source hash, so re-running the same variant
+#      skips the compile.
+#
+# Everything is keyed on the hash of the artefact that produced it, so a
+# bug-injected variant can never be served a clean variant's answers.
+_WORKERS = min(16, (os.cpu_count() or 4) * 2)
+_CACHE_DIR = Path(__file__).resolve().parent / "out"
+
+# Wrapper that drives the AI-generated class over the same pipe-delimited
+# wire protocol, in one JVM. It does not modify (or subclass, or reach into)
+# the generated class: it calls the same static compute(String[]) entry point
+# main() calls, once per input line. GeneratedIntcalc holds no mutable static
+# state — every field it declares is `static final` — so vectors cannot leak
+# into each other; this is the same isolation the per-vector JVM gave.
+_BATCH_RUNNER = """
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+
+public class BatchRunner {
+    public static void main(String[] args) throws Exception {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
+        StringBuilder out = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            if (line.isEmpty()) continue;
+            try {
+                String[] result = GeneratedIntcalc.compute(line.split("\\\\|", -1));
+                out.append("OK\\t").append(String.join("|", result)).append('\\n');
+            } catch (Throwable t) {
+                // Mirrors the per-vector runner: one bad vector must not
+                // take down the rest of the batch.
+                out.append("ERR\\t").append(t).append('\\n');
+            }
+        }
+        System.out.print(out);
+    }
+}
+"""
+
+
+def _digest(*chunks: bytes) -> str:
+    h = hashlib.sha256()
+    for c in chunks:
+        h.update(c)
+    return h.hexdigest()[:16]
+
+
+def _load_disk_cache(name: str) -> dict:
+    path = _CACHE_DIR / f".cache_{name}.json"
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}  # missing or corrupt cache is never fatal — just recompute
+
+
+def _save_disk_cache(name: str, data: dict) -> None:
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        (_CACHE_DIR / f".cache_{name}.json").write_text(json.dumps(data))
+    except Exception:
+        pass  # a cache we cannot persist is a slow run, not a broken one
+
+
+def _install_fast_differential() -> None:
+    if getattr(_pipeline_mod.run_differential, "_fast", False):
+        return  # already installed in this server process
+
+    original_oracle = _differential.run_oracle
+    original_differential = _pipeline_mod.run_differential
+    original_compile = _differential.compile_java
+
+    oracle_memo: dict = {}          # {binary_hash: {wire_line: output_dict}}
+    java_memo: dict = {}            # {class_hash:  {wire_line: output_dict}}
+    compiled: dict = {}             # {source_hash: build_dir}
+    lock = threading.Lock()
+
+    # ---------------------------------------------------------- COBOL side
+    def oracle_bucket() -> tuple[str, dict]:
+        binary = _cobol_runner.ensure_compiled()   # rebuilds if INTCALC.cbl changed
+        key = _digest(binary.read_bytes())
+        if key not in oracle_memo:
+            with lock:
+                oracle_memo[key] = _load_disk_cache(f"oracle_{key}")
+        return key, oracle_memo[key]
+
+    def cached_oracle(vector_input, sig):
+        key, bucket = oracle_bucket()
+        line = _cobol_runner.encode_input(vector_input, sig)
+        hit = bucket.get(line)
+        if hit is None:
+            hit = original_oracle(vector_input, sig)
+            with lock:
+                bucket[line] = hit
+        return dict(hit)
+
+    def fill_oracle(vectors, sig) -> None:
+        """Runs the real oracle for every input not already memoised. One
+        process per vector is unavoidable here, so they run concurrently."""
+        key, bucket = oracle_bucket()
+        missing = {_cobol_runner.encode_input(v.input, sig): v.input
+                   for v in vectors if _cobol_runner.encode_input(v.input, sig) not in bucket}
+        if not missing:
+            return
+        with ThreadPoolExecutor(max_workers=_WORKERS) as pool:
+            results = pool.map(lambda i: original_oracle(i, sig), missing.values())
+            for line, out in zip(missing, results):
+                bucket[line] = out
+        _save_disk_cache(f"oracle_{key}", bucket)
+
+    # ----------------------------------------------------------- Java side
+    def cached_compile(source):
+        key = _digest(source.content.encode())
+        if key not in compiled:
+            build_dir = original_compile(source)          # real javac run
+            runner = Path(build_dir).parent / "BatchRunner.java"
+            runner.write_text(_BATCH_RUNNER)
+            subprocess.run(["javac", "-cp", str(build_dir), "-d", str(build_dir), str(runner)],
+                           capture_output=True, text=True, check=True)
+            compiled[key] = build_dir
+        return compiled[key]
+
+    def java_bucket(module) -> tuple[str, dict]:
+        classes = sorted(Path(module.build_dir).glob("*.class"))
+        key = _digest(*(p.read_bytes() for p in classes))
+        if key not in java_memo:
+            java_memo[key] = _load_disk_cache(f"java_{key}")
+        return key, java_memo[key]
+
+    def fill_java(vectors, module, sig) -> dict:
+        """Feeds every not-yet-memoised vector through ONE JVM, over the
+        same wire protocol the per-vector runner used."""
+        key, bucket = java_bucket(module)
+        missing = [line for line in
+                   dict.fromkeys(_cobol_runner.encode_input(v.input, sig) for v in vectors)
+                   if line not in bucket]
+        if missing:
+            proc = subprocess.run(
+                ["java", "-cp", str(module.build_dir), "BatchRunner"],
+                input="\n".join(missing) + "\n", capture_output=True, text=True,
+            )
+            if proc.returncode != 0:
+                raise JavaRunnerError(f"batch java run failed:\n{proc.stderr}")
+            replies = [ln for ln in proc.stdout.splitlines() if ln]
+            if len(replies) != len(missing):
+                raise JavaRunnerError(
+                    f"batch java returned {len(replies)} lines for {len(missing)} vectors"
+                )
+            for line, reply in zip(missing, replies):
+                status, _, payload = reply.partition("\t")
+                bucket[line] = (_cobol_runner.decode_output(payload, sig)
+                                if status == "OK" else {"__error__": payload})
+            _save_disk_cache(f"java_{key}", bucket)
+        return bucket
+
+    class MemoisedJava:
+        """Serves the batch's answers through the same .compute(dict) -> dict
+        surface core/differential.py already calls."""
+
+        def __init__(self, bucket: dict, sig):
+            self.bucket = bucket
+            self.sig = sig
+
+        def compute(self, input_dict):
+            out = self.bucket[_cobol_runner.encode_input(input_dict, self.sig)]
+            if "__error__" in out:
+                # core/differential.py catches this and records every output
+                # field as divergent, exactly as it did per-vector.
+                raise JavaRunnerError(out["__error__"])
+            return dict(out)
+
+    # ------------------------------------------------------------ the swap
+    def fast_differential(vectors, module, sig):
+        if not isinstance(module, JavaGeneratedModule):
+            return original_differential(vectors, module, sig)
+        fill_oracle(vectors, sig)
+        bucket = fill_java(vectors, module, sig)
+        # core/differential.py then runs its own loop and its own comparison
+        # over pre-computed values — the divergence logic stays untouched.
+        return original_differential(vectors, MemoisedJava(bucket, sig), sig)
+
+    fast_differential._fast = True
+    fast_differential._fill_oracle = fill_oracle
+    _differential.run_oracle = cached_oracle
+    _differential.compile_java = cached_compile
+    _pipeline_mod.load_generated = _differential.load_generated
+    _pipeline_mod.run_differential = fast_differential
+
+
+_prewarm_started = False
+
+
+def _prewarm() -> None:
+    """Builds the oracle cache for the shipped vectors in the background, so
+    the first click lands on a warm cache instead of paying for 230 COBOL
+    processes. Starts at page load (not at click time, which would be too
+    late to help), runs once per server, and never blocks the page."""
+    global _prewarm_started
+    if _prewarm_started:
+        return
+    _prewarm_started = True
+
+    def work():
+        try:
+            _pipeline_mod.run_differential._fill_oracle(
+                load_seed_vectors() + load_heldback_vectors(), load_signature())
+        except Exception:
+            pass  # a failed pre-warm only means the first run is slower
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+def _install_lazy_trace_flush() -> None:
+    """Tracer rewrites the whole HTML trace after every recorded event, and
+    each rewrite re-renders every prior event, so a full run spends most of
+    its time (O(n^2)) re-writing the same file. Write it at start and at
+    finalize() instead; the finished trace has the same content."""
+    if getattr(_Tracer._flush, "_lazy", False):
+        return
+    original_flush = _Tracer._flush
+
+    def lazy_flush(self):
+        if self.steps and not self.summary:  # mid-run: finalize() writes it out
+            return
+        original_flush(self)
+
+    lazy_flush._lazy = True
+    _Tracer._flush = lazy_flush
+
+
+_install_fast_differential()
+_install_lazy_trace_flush()
+_prewarm()       # at page load, so the cache is filling while the user reads
 
 
 @st.cache_resource
@@ -365,12 +631,6 @@ with st.sidebar:
         st.caption(f"→ {VARIANT_OPTIONS[variant_key]['help']}")
 
     run_clicked = st.button("▶  Run pipeline", type="primary", use_container_width=True)
-
-    with st.container(border=True):
-        st.caption(
-            "🔧 **LLM mode**: set in `ai_platform/config.yaml` (`llm.mode: mock|real`). "
-            "Mock mode (default) is fully offline and deterministic — no API key needed."
-        )
 
 import datetime as _dt
 
