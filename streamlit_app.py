@@ -15,6 +15,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import os
 import subprocess
 import sys
@@ -198,6 +199,95 @@ st.markdown(
     .score-pct { font-weight:800; color:#14243a; min-width:3.6rem; text-align:right; }
     .score-lbl { flex:1; }
     .score-cnt { color:#8a94a1; font-size:.82rem; white-space:nowrap; }
+
+    /* --------------------------------------------- collapsible sections */
+    [data-testid="stExpander"] {
+        border:1px solid #e8eaee !important; border-radius:14px !important;
+        background:#ffffff !important; margin-bottom:1rem !important;
+        box-shadow:0 1px 2px rgba(20,36,58,.04), 0 6px 18px rgba(20,36,58,.05) !important;
+        overflow:hidden !important;
+    }
+    [data-testid="stExpander"] summary {
+        font-weight:700 !important; font-size:.92rem !important;
+        padding:.72rem 1rem !important; border-radius:14px !important;
+    }
+    [data-testid="stExpander"] summary:hover { background:#f7f8fa !important; }
+    /* No per-state colour tint here: Streamlit gives expanders no hook to
+       target an individual one, and the emoji + wording in each header
+       already names the state. Colour would have been decoration anyway. */
+
+    /* ------------------------------------------------ hero metric row */
+    .hero-row { display:flex; gap:1rem; flex-wrap:wrap; margin-bottom:1.1rem; }
+    .hero-card {
+        flex:1 1 250px; background:#ffffff; border:1px solid #e8eaee;
+        border-radius:18px; padding:1.15rem 1.3rem 1.25rem;
+        box-shadow:0 1px 2px rgba(20,36,58,.04), 0 8px 24px rgba(20,36,58,.06);
+        position:relative; overflow:hidden;
+    }
+    .hero-card::before {
+        content:""; position:absolute; inset:0 0 auto 0; height:4px;
+        background:linear-gradient(90deg, var(--a) 0%, var(--a) 60%, transparent 100%);
+    }
+    .hero-card.wide { flex:2 1 420px; }
+    .hc-label {
+        font-size:.7rem; font-weight:800; letter-spacing:.1em; text-transform:uppercase;
+        color:#8a94a1; margin-bottom:.15rem;
+    }
+    .hc-sub { font-size:.83rem; color:#5a6472; line-height:1.45; }
+    .hc-sub b { color:#14243a; }
+
+    /* radial gauge — the single headline number, ring + value in the middle */
+    .gauge-wrap { display:flex; justify-content:center; padding:.35rem 0 .5rem; }
+    svg.gauge { width:158px; height:158px; display:block; }
+    svg.gauge .g-track { fill:none; stroke:#eef0f3; }
+    svg.gauge .g-val   { fill:none; transition:stroke-dasharray .5s ease; }
+    svg.gauge .g-num {
+        font-size:30px; font-weight:800; fill:#14243a; text-anchor:middle;
+        font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+    }
+    svg.gauge .g-cap {
+        font-size:10.5px; font-weight:700; fill:#8a94a1; text-anchor:middle;
+        letter-spacing:.09em; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+    }
+
+    /* composition bar — proportion of rule outcomes */
+    .comp-bar {
+        display:flex; height:30px; border-radius:9px; overflow:hidden;
+        background:#f0f1f3; margin:.9rem 0 .85rem;
+    }
+    .comp-seg { height:100%; min-width:3px; border-right:2px solid #fff; position:relative; }
+    .comp-seg:last-child { border-right:none; }
+    .comp-legend { display:flex; flex-direction:column; gap:.45rem; }
+    .comp-row { display:flex; align-items:center; gap:.55rem; font-size:.87rem; }
+    .comp-sw { width:12px; height:12px; border-radius:3px; flex:none; }
+    .comp-pct {
+        font-weight:800; color:#14243a; min-width:3.5rem; text-align:right;
+        font-variant-numeric:tabular-nums;
+    }
+    .comp-lbl { flex:1; color:#3a4453; }
+    .comp-cnt { color:#8a94a1; font-size:.82rem; white-space:nowrap; }
+    .comp-foot {
+        display:flex; gap:.6rem; margin-top:1rem; padding-top:.85rem;
+        border-top:1px solid #eef0f3;
+    }
+    .cf-item { flex:1; }
+    .cf-num { font-size:1.25rem; font-weight:800; color:#14243a; line-height:1.2; }
+    .cf-lbl { font-size:.74rem; color:#8a94a1; font-weight:600; }
+
+    /* rule map — every rule in the scope, at a glance */
+    .rule-map-wrap {
+        background:#ffffff; border:1px solid #e8eaee; border-radius:18px;
+        padding:1.05rem 1.25rem 1.2rem; margin-bottom:1.1rem;
+        box-shadow:0 1px 2px rgba(20,36,58,.04), 0 8px 24px rgba(20,36,58,.06);
+    }
+    .rule-map { display:flex; flex-wrap:wrap; gap:.45rem; margin-top:.75rem; }
+    .rm-chip {
+        display:inline-flex; align-items:center; gap:.3rem; cursor:default;
+        border:1px solid #e8eaee; border-left:4px solid var(--c);
+        border-radius:8px; padding:.32rem .6rem; font-size:.79rem; font-weight:700;
+        color:#14243a; background:#fcfcfd; transition:transform .12s ease, box-shadow .12s ease;
+    }
+    .rm-chip:hover { transform:translateY(-2px); box-shadow:0 4px 12px rgba(20,36,58,.12); }
 
     /* --- Pin a light theme regardless of the browser/OS dark-mode setting.
        Streamlit's dark theme drives almost everything through these CSS
@@ -902,33 +992,6 @@ if facts.untraceable_findings:
 # They are deliberately kept apart — a rule is not a test, and one rule can
 # be exercised by many vectors, so mixing them into one "pass rate" would be
 # a meaningless number.
-def score_panel(title: str, headline: str, headline_sub: str, accent: str,
-                rows: list[tuple[str, str, int, float]]) -> str:
-    """rows: (color, label, count, pct) — rendered as a stacked bar + legend."""
-    bar = "".join(
-        f'<div class="score-seg" title="{label}: {pct:.1f}%" '
-        f'style="width:{pct:.3f}%; background:{color};"></div>'
-        for color, label, count, pct in rows if pct > 0
-    )
-    legend = "".join(
-        f'<div class="score-row">'
-        f'<span class="score-sw" style="background:{color};"></span>'
-        f'<span class="score-pct">{pct:.1f}%</span>'
-        f'<span class="score-lbl">{label}</span>'
-        f'<span class="score-cnt">{count}</span></div>'
-        for color, label, count, pct in rows
-    )
-    return f"""
-    <div class="score-panel" style="--accent:{accent};">
-        <div class="score-title">{title}</div>
-        <div class="score-headline">{headline}</div>
-        <div class="score-sub">{headline_sub}</div>
-        <div class="score-bar">{bar}</div>
-        <div class="score-rows">{legend}</div>
-    </div>
-    """
-
-
 def _pct(n: int, total: int) -> float:
     return (n / total * 100) if total else 0.0
 
@@ -948,27 +1011,116 @@ c_ok = STATUS_META["VALIDATED"]["border"]
 c_bad = STATUS_META["INVALIDATED_DEFECT"]["border"]
 c_na = STATUS_META["UNCOVERABLE"]["border"]
 
-p1, p2 = st.columns(2)
-p1.markdown(score_panel(
-    "Rule validation · success rate",
-    f"{_pct(n_ok, n_rules):.1f}%",
-    f"{n_ok} of {n_rules} rules validated flawless",
-    c_ok,
-    [(c_ok, "Succeeded — validated flawless", n_ok, _pct(n_ok, n_rules)),
-     (c_bad, "Failed — flaw found", n_bad, _pct(n_bad, n_rules)),
-     (c_na, "Not testable — uncoverable / untested", n_na, _pct(n_na, n_rules))],
-), unsafe_allow_html=True)
 
-p2.markdown(score_panel(
-    "Test execution · match rate",
-    f"{_pct(n_vec_ok, n_vec):.1f}%",
-    f"{n_vec_ok} of {n_vec} vectors matched the COBOL oracle exactly",
-    ACCENT_NEUTRAL,
-    [(c_ok, "Succeeded — output identical to oracle", n_vec_ok, _pct(n_vec_ok, n_vec)),
-     (c_bad, "Diverged — at least one field differs", n_vec_bad, _pct(n_vec_bad, n_vec))],
-), unsafe_allow_html=True)
+def gauge_card(label: str, value: float | None, color: str, cap: str, sub: str) -> str:
+    """A single headline percentage as a radial gauge. The number is printed
+    in the middle, so the ring is reinforcement rather than the only way to
+    read the value — colour alone never carries the result.
 
-st.write("")
+    value=None means "no such rate here" and draws an empty ring reading
+    n/a. That is not the same as 0%: a scope where nothing is judgeable has
+    no pass rate, and showing 0% would read as "everything failed"."""
+    r, sw = 66, 13
+    circ = 2 * math.pi * r
+    if value is None:
+        return f"""
+    <div class="hero-card" style="--a:#c9ced6">
+      <div class="hc-label">{label}</div>
+      <div class="gauge-wrap">
+        <svg class="gauge" viewBox="0 0 160 160" role="img" aria-label="{label}: not applicable">
+          <title>{label}: not applicable — {sub}</title>
+          <circle class="g-track" cx="80" cy="80" r="{r}" stroke-width="{sw}"/>
+          <text class="g-num" x="80" y="80" style="fill:#9aa3b0">n/a</text>
+          <text class="g-cap" x="80" y="99">{cap}</text>
+        </svg>
+      </div>
+      <div class="hc-sub">{sub}</div>
+    </div>"""
+    dash = max(0.0, min(100.0, value)) / 100 * circ
+    return f"""
+    <div class="hero-card" style="--a:{color}">
+      <div class="hc-label">{label}</div>
+      <div class="gauge-wrap">
+        <svg class="gauge" viewBox="0 0 160 160" role="img"
+             aria-label="{label}: {value:.1f} percent. {sub}">
+          <title>{label}: {value:.1f}% — {sub}</title>
+          <circle class="g-track" cx="80" cy="80" r="{r}" stroke-width="{sw}"/>
+          <circle class="g-val" cx="80" cy="80" r="{r}" stroke-width="{sw}"
+                  stroke="{color}" stroke-linecap="round"
+                  stroke-dasharray="{dash:.2f} {circ:.2f}"
+                  transform="rotate(-90 80 80)"/>
+          <text class="g-num" x="80" y="80">{value:.1f}%</text>
+          <text class="g-cap" x="80" y="99">{cap}</text>
+        </svg>
+      </div>
+      <div class="hc-sub">{sub}</div>
+    </div>"""
+
+
+def composition_card(label: str, rows: list[tuple[str, str, str, int, float]],
+                     footer: list[tuple[str, str]]) -> str:
+    """Proportion bar + legend. rows: (colour, icon, label, count, pct).
+    Every segment is repeated in the legend with its icon, name, percentage
+    and count — required here, because validated-green and defect-red are
+    close enough under deuteranopia that colour alone would not separate
+    'passed' from 'failed'."""
+    segs = "".join(
+        f'<div class="comp-seg" style="width:{pc:.3f}%;background:{col}" '
+        f'title="{lbl}: {n} ({pc:.1f}%)"></div>'
+        for col, ic, lbl, n, pc in rows if pc > 0
+    )
+    legend = "".join(
+        f'<div class="comp-row"><span class="comp-sw" style="background:{col}"></span>'
+        f'<span class="comp-pct">{pc:.1f}%</span>'
+        f'<span class="comp-lbl">{ic} {lbl}</span>'
+        f'<span class="comp-cnt">{n} rules</span></div>'
+        for col, ic, lbl, n, pc in rows
+    )
+    foot = "".join(
+        f'<div class="cf-item"><div class="cf-num">{num}</div>'
+        f'<div class="cf-lbl">{lbl}</div></div>'
+        for num, lbl in footer
+    )
+    return f"""
+    <div class="hero-card wide" style="--a:{ACCENT_NEUTRAL}">
+      <div class="hc-label">{label}</div>
+      <div class="comp-bar">{segs}</div>
+      <div class="comp-legend">{legend}</div>
+      <div class="comp-foot">{foot}</div>
+    </div>"""
+
+
+st.markdown(
+    '<div class="hero-row">'
+    + gauge_card(
+        "Pass rate · judgeable rules",
+        _pct(n_ok, n_testable) if n_testable else None, c_ok, "PASSED",
+        (f"<b>{n_ok} passed</b> / {n_bad} failed of the {n_testable} rules with both a "
+         f"test and a code path."
+         + (f" {n_na} more cannot be judged from this module's output." if n_na else ""))
+        if n_testable else
+        f"<b>None of these {n_rules} rules is independently judgeable</b> from this "
+        f"module's output, so there is no pass rate to report — not a rate of zero.",
+    )
+    + gauge_card(
+        "Vectors matching the oracle",
+        _pct(n_vec_ok, n_vec), ACCENT_NEUTRAL, "MATCHED",
+        f"<b>{n_vec_ok} of {n_vec} vectors</b> produced output identical to the compiled "
+        f"COBOL oracle · {facts.total_divergences} field-level divergences.",
+    )
+    + composition_card(
+        f"Rule outcomes · {n_rules} in scope",
+        [(c_ok, "✅", "Succeeded — validated flawless", n_ok, _pct(n_ok, n_rules)),
+         (c_bad, "❌", "Failed — flaw found", n_bad, _pct(n_bad, n_rules)),
+         (c_na, "◻️", "Not testable — uncoverable / untested", n_na, _pct(n_na, n_rules))],
+        [(f"{n_vec:,}", "test vectors executed"),
+         (f"{n_vec_bad:,}", "vectors diverged"),
+         (f"{facts.total_divergences:,}", "field divergences"),
+         (f"{len(facts.untraceable_findings)}", "untraceable findings")],
+    )
+    + "</div>",
+    unsafe_allow_html=True,
+)
 
 # A scope narrower than the whole rule file must say so, so a 100% score is
 # never read as "all 24 rules pass".
@@ -979,30 +1131,38 @@ if st.session_state.get("scope_key") != "Full run" and n_rules < 24:
         f"for the complete picture."
     )
 
-# One honest headline: of the rules that CAN be judged, how many passed.
-if n_testable:
-    st.markdown(
-        f"#### ✅ {_pct(n_ok, n_testable):.1f}% pass rate on testable rules "
-        f"<span style='font-size:.8rem;font-weight:500;color:#6b7280;'>"
-        f"({n_ok} passed / {n_bad} failed, out of the {n_testable} rules with both a test "
-        f"and a code path — the other {n_na} cannot be judged from this module's output)"
-        f"</span>",
-        unsafe_allow_html=True,
-    )
+# Rule map: the whole scope on one line of sight. Hover any chip for its
+# verdict and the rule text.
+chips = "".join(
+    f'<span class="rm-chip" style="--c:{STATUS_META[r.status]["border"]}" '
+    f'title="{r.rule_id} — {STATUS_META[r.status]["label"]} (flaw side: {r.flaw_side})'
+    f'&#10;&#10;{" ".join(r.statement.split())}">'
+    f'{r.rule_id} {STATUS_META[r.status]["icon"]}</span>'
+    for r in facts.traceability
+)
+st.markdown(
+    f'<div class="rule-map-wrap">'
+    f'<div class="hc-label">Rule map · hover any rule for its verdict</div>'
+    f'<div class="rule-map">{chips}</div></div>',
+    unsafe_allow_html=True,
+)
 
-with st.expander(f"Breakdown of the {n_bad} failures and {n_na} not-testable rules"):
-    status_counts = pd.Series([row.status for row in facts.traceability]).value_counts()
-    brk = [{"Status": f"{STATUS_META[s]['icon']} {STATUS_META[s]['label']}",
-            "Rules": int(status_counts.get(s, 0)),
-            "% of all rules": f"{_pct(int(status_counts.get(s, 0)), n_rules):.1f}%",
-            "Rules affected": ", ".join(r.rule_id for r in facts.traceability if r.status == s) or "—"}
-           for s in STATUS_ORDER if int(status_counts.get(s, 0)) > 0]
-    st.dataframe(pd.DataFrame(brk), use_container_width=True, hide_index=True)
-    st.caption(
-        f"{facts.total_divergences} field-level divergence records across "
-        f"{n_vec_bad} diverging vectors — one record per (vector, field) pair, so a vector "
-        f"that disagrees on two fields counts twice."
-    )
+status_counts = pd.Series([row.status for row in facts.traceability]).value_counts()
+# Nothing to break down on a fully clean scope — don't offer an empty toggle.
+if n_bad or n_na:
+    with st.expander(f"Breakdown of the {n_bad} failures and {n_na} not-testable rules"):
+        brk = [{"Status": f"{STATUS_META[s]['icon']} {STATUS_META[s]['label']}",
+                "Rules": int(status_counts.get(s, 0)),
+                "% of all rules": f"{_pct(int(status_counts.get(s, 0)), n_rules):.1f}%",
+                "Rules affected": ", ".join(r.rule_id for r in facts.traceability
+                                            if r.status == s) or "—"}
+               for s in STATUS_ORDER if int(status_counts.get(s, 0)) > 0]
+        st.dataframe(pd.DataFrame(brk), use_container_width=True, hide_index=True)
+        st.caption(
+            f"{facts.total_divergences} field-level divergence records across "
+            f"{n_vec_bad} diverging vectors — one record per (vector, field) pair, so a "
+            f"vector that disagrees on two fields counts twice."
+        )
 
 st.write("")
 
