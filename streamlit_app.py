@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import re
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pandas as pd
@@ -307,6 +310,29 @@ def autosave_run(result, label: str) -> Path:
     return out_dir
 
 
+COBOL_SOURCE_PATH = Path(__file__).resolve().parent / "data" / "src" / "legacy" / "INTCALC.cbl"
+COBOL_BACKUP_DIR = RUNS_DIR / "cobol_backups"
+
+
+def _to_raw_github_url(url: str) -> str:
+    """Convert a github.com/.../blob/... URL to its raw.githubusercontent.com
+    equivalent, so pasting the ordinary browser link (what someone would
+    actually copy) works, not just an already-raw URL."""
+    m = re.match(r"^https://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$", url.strip())
+    if m:
+        user, repo, branch, path = m.groups()
+        return f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/{path}"
+    return url.strip()
+
+
+def fetch_cobol_source(url: str, timeout: int = 15) -> str:
+    raw_url = _to_raw_github_url(url)
+    req = urllib.request.Request(raw_url, headers={"User-Agent": "CodeVerus-demo"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = resp.read()
+    return data.decode("utf-8", errors="replace")
+
+
 def run_scope(scope: str):
     pipeline = get_pipeline()
     heldback = load_heldback_vectors()
@@ -374,6 +400,27 @@ with st.sidebar:
     st.markdown("## CodeVerus")
     st.caption("AI COBOL modernization & rule validation")
     st.write("")
+
+    with st.container(border=True):
+        st.markdown("#### 0. Load legacy COBOL source (optional)")
+        current_source_url = st.session_state.get("cobol_source_url")
+        if current_source_url:
+            st.caption(f"→ Currently validating against code loaded from: {current_source_url}")
+        else:
+            st.caption("→ Currently validating against the bundled "
+                       "`data/src/legacy/INTCALC.cbl`.")
+        github_url = st.text_input(
+            "GitHub URL (page link or raw link)", key="github_cobol_url",
+            placeholder="https://github.com/org/repo/blob/main/INTCALC.cbl",
+            label_visibility="collapsed",
+        )
+        load_cobol_clicked = st.button(
+            "⬇  Load COBOL from GitHub", use_container_width=True,
+        )
+        st.caption("Overwrites the local COBOL file and recompiles automatically on "
+                   "the next Run pipeline click. The rules and I/O spec below still "
+                   "describe INTCALC specifically — this is for pulling a different "
+                   "*revision* of the same program, not an unrelated one.")
 
     with st.container(border=True):
         st.markdown("#### 1. Choose what to test")
@@ -474,6 +521,38 @@ with st.sidebar:
                 "✏️  Modify rule & re-validate", use_container_width=True,
             )
 
+
+if load_cobol_clicked:
+    if not github_url.strip():
+        st.warning("Paste a GitHub URL first.")
+    else:
+        try:
+            with st.spinner("Fetching COBOL source from GitHub..."):
+                content = fetch_cobol_source(github_url)
+            if not content.strip():
+                st.error("Fetched file is empty — check the URL.")
+            else:
+                COBOL_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+                if COBOL_SOURCE_PATH.exists():
+                    backup_path = COBOL_BACKUP_DIR / (
+                        f"INTCALC_{_dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.cbl.bak"
+                    )
+                    backup_path.write_text(COBOL_SOURCE_PATH.read_text())
+                COBOL_SOURCE_PATH.write_text(content)
+                st.session_state["cobol_source_url"] = github_url.strip()
+                st.success(
+                    f"Loaded {len(content)} characters from GitHub into "
+                    f"`data/src/legacy/INTCALC.cbl`. Click **Run pipeline** to "
+                    f"recompile it and validate against it."
+                )
+                with st.expander("Preview fetched source"):
+                    st.code(content[:3000], language="cobol")
+        except urllib.error.HTTPError as exc:
+            st.error(f"GitHub returned an error ({exc.code}) — check the URL is public and correct.")
+        except urllib.error.URLError as exc:
+            st.error(f"Couldn't reach GitHub from this environment: {exc.reason}")
+        except Exception as exc:
+            st.error(f"Failed to load COBOL source: {exc}")
 
 if run_clicked:
     # Keep the run this button-click is about to replace, so a "compare
@@ -888,6 +967,8 @@ with tabs[7]:
         st.code(path.read_text(), language=language, line_numbers=True)
 
     if src_choice.startswith("🗄️"):
+        if st.session_state.get("cobol_source_url"):
+            st.caption(f"→ Loaded from GitHub: {st.session_state['cobol_source_url']}")
         show_source(root / "data" / "src" / "legacy" / "INTCALC.cbl", "cobol")
     elif src_choice.startswith("📜"):
         show_source(root / "data" / "rules" / "validated_rules.yaml", "yaml")
