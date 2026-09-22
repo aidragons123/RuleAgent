@@ -239,3 +239,129 @@ class Pipeline:
             sections=sections, evidence_path=evidence_path, trace_path=tracer.path,
             abstentions=tracer.abstentions,
         )
+
+    def modify_rule_and_revalidate(
+        self, rule_id: str, new_statement: str, vectors: list[TestVector],
+        run_id: str = "rule-change", evidence_out_path: Path | None = None,
+    ) -> PipelineResult:
+        """Re-run steps 4-9 (generate -> differential -> diagnosis ->
+        traceability -> evidence) with ONE rule's statement text changed,
+        reusing the existing test vectors (step 2 is skipped - no
+        re-synthesis). This never touches data/rules/validated_rules.yaml
+        on disk; the modified rule list is purely in-memory for this one
+        run. Used by the UI's "modify a rule" flow: shows what happens
+        when a requirement changes and the frozen legacy oracle doesn't -
+        a realistic drift scenario, distinct from the bug-injection flow's
+        "the AI made an implementation mistake" scenario."""
+        modified_rules = [
+            r.model_copy(update={"statement": new_statement}) if r.id == rule_id else r
+            for r in self.rules
+        ]
+        modified_rules_by_id = {r.id: r for r in modified_rules}
+
+        cfg = self.cfg
+        tracer = Tracer(
+            case_ids=[run_id], model=cfg["llm"]["model"],
+            temperature=cfg["llm"]["temperature"], seed=cfg["llm"]["seed"],
+            config_hash=str(hash(json.dumps(cfg, sort_keys=True))),
+        )
+        resolver = CitationResolver(modified_rules_by_id, self.sig)
+        resolver.register_vectors(vectors)
+        impl_ai = ImplementationAI(tracer=tracer, citation_resolver=resolver)
+        div_ai = DivergenceAI(tracer=tracer, citation_resolver=resolver)
+        ev_ai = EvidenceAI(tracer=tracer, citation_resolver=resolver)
+
+        tracer.record_step("Load rules and IO signature", "deterministic",
+                            detail=f"{len(modified_rules)} rules loaded ({rule_id} modified)")
+        tracer.record_step("Reuse test vectors from prior run", "deterministic",
+                            detail=f"{len(vectors)} vectors")
+        tracer.record_step("Golden output source: core/cobol_runner.py", "deterministic",
+                            detail="invoked per-vector during the differential run")
+
+        impl_result = impl_ai.generate(modified_rules, self.sig, vectors)
+        if impl_result.abstained:
+            raise RuntimeError(f"ImplementationAI abstained: {impl_result.abstain_reason}")
+        source = impl_result.value
+        GENERATED_DIR.mkdir(exist_ok=True, parents=True)
+        out_path = REPO_ROOT / source.path
+        out_path.parent.mkdir(exist_ok=True, parents=True)
+        out_path.write_text(source.content)
+        tracer.record_step("Generate the implementation from the modified rule", "ai",
+                            detail=source.path)
+
+        module = load_generated(source, self.sig)
+        divergences = run_differential(vectors, module, self.sig)
+        tracer.record_step("Run both, find divergences", "deterministic",
+                            detail=f"{len(divergences)} field-level divergences")
+        for d in divergences:
+            tracer.record_evidence_citation("core/cobol_runner.py", d.vector_id, True)
+
+        diagnoses: list[Diagnosis] = []
+        for d in divergences:
+            rule = modified_rules_by_id.get(d.rule_ids[0]) if d.rule_ids else None
+            result = div_ai.diagnose(rule, d)
+            if result.abstained:
+                tracer.record_manual_abstention("DivergenceAI", d.vector_id, result.abstain_reason)
+                continue
+            diagnoses.append(result.value)
+        tracer.record_step("Diagnose each divergence", "ai", detail=f"{len(diagnoses)} diagnosed")
+
+        matrix = build_traceability_matrix(modified_rules, vectors, source, diagnoses)
+        untraceable = collect_untraceable_findings(diagnoses, set(modified_rules_by_id))
+        tracer.record_step("Build the traceability matrix", "deterministic",
+                            detail=f"{len(untraceable)} untraceable-behaviour findings")
+        for row in matrix:
+            verdict = "pass" if row.status in ("VALIDATED", "UNCOVERABLE") else "block"
+            tracer.record_guardrail(f"G5 coverage: {row.rule_id}", verdict, row.status)
+
+        coverage = coverage_from_matrix(matrix)
+        facts = EvidenceFacts(
+            run_id=run_id,
+            total_rules=coverage.total_rules,
+            rules_validated=coverage.validated,
+            rules_invalidated=coverage.invalidated,
+            rules_uncoverable=coverage.uncoverable + coverage.untested,
+            total_vectors=len(vectors),
+            total_divergences=len(divergences),
+            known_divergence_ids=sorted({d.vector_id for d in divergences}),
+            untraceable_findings=untraceable,
+            traceability=matrix,
+            determinism={
+                "model": cfg["llm"]["model"], "temperature": cfg["llm"]["temperature"],
+                "seed": cfg["llm"]["seed"],
+            },
+        )
+
+        sections: dict[str, str] = {}
+        for kind in ["change_summary", "test_evidence", "impact_assessment",
+                     "known_divergences", "rollback_plan"]:
+            result = ev_ai.write_section(kind, facts)  # type: ignore[arg-type]
+            if result.abstained:
+                sections[kind] = f"(abstained: {result.abstain_reason})"
+                tracer.record_manual_abstention("EvidenceAI", kind, result.abstain_reason)
+            else:
+                sections[kind] = result.value
+        tracer.record_step("Draft evidence sections", "ai", detail=f"{len(sections)} sections")
+
+        if evidence_out_path is not None:
+            evidence_path = render_evidence_pack(facts, sections, out_path=evidence_out_path)
+        else:
+            evidence_path = render_evidence_pack(facts, sections)
+        tracer.record_step("Render the approval pack", "deterministic", detail=str(evidence_path))
+
+        tracer.finalize({
+            "total_rules": facts.total_rules,
+            "validated": facts.rules_validated,
+            "invalidated": facts.rules_invalidated,
+            "uncoverable": facts.rules_uncoverable,
+            "total_vectors": facts.total_vectors,
+            "total_divergences": facts.total_divergences,
+            "abstentions": len(tracer.abstentions),
+        })
+
+        return PipelineResult(
+            rules=modified_rules, sig=self.sig, vectors=vectors, source=source,
+            divergences=divergences, diagnoses=diagnoses, matrix=matrix, facts=facts,
+            sections=sections, evidence_path=evidence_path, trace_path=tracer.path,
+            abstentions=tracer.abstentions,
+        )

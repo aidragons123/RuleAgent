@@ -12,14 +12,18 @@ Run with: streamlit run streamlit_app.py   (or `make ui`)
 from __future__ import annotations
 
 import csv
+import datetime as _dt
 import hashlib
 import io
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace as _dc_replace
@@ -33,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import core.differential as _differential  # noqa: E402
 import core.pipeline as _pipeline_mod  # noqa: E402
 from ai.implementation import BUG_VARIANTS  # noqa: E402
+from ai_platform.config import get_config  # noqa: E402
 from ai_platform.tracer import Tracer as _Tracer  # noqa: E402
 from core import cobol_runner as _cobol_runner  # noqa: E402
 from core.harness import coverage_from_matrix  # noqa: E402
@@ -690,6 +695,29 @@ def get_pipeline() -> Pipeline:
     return Pipeline()
 
 
+COBOL_SOURCE_PATH = Path(__file__).resolve().parent / "data" / "src" / "legacy" / "INTCALC.cbl"
+COBOL_BACKUP_DIR = Path(__file__).resolve().parent / "runs" / "cobol_backups"
+
+
+def _to_raw_github_url(url: str) -> str:
+    """Convert a github.com/.../blob/... URL to its raw.githubusercontent.com
+    equivalent, so pasting the ordinary browser link (what someone would
+    actually copy) works, not just an already-raw URL."""
+    m = re.match(r"^https://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$", url.strip())
+    if m:
+        user, repo, branch, path = m.groups()
+        return f"https://raw.githubusercontent.com/{user}/{repo}/{branch}/{path}"
+    return url.strip()
+
+
+def fetch_cobol_source(url: str, timeout: int = 15) -> str:
+    raw_url = _to_raw_github_url(url)
+    req = urllib.request.Request(raw_url, headers={"User-Agent": "CodeVerus-demo"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = resp.read()
+    return data.decode("utf-8", errors="replace")
+
+
 # The happy flow is the clean path: the rules this implementation satisfies
 # EXACTLY — every one validated against the real COBOL oracle, zero
 # divergence, nothing left untested. Scoping the run to them is what makes
@@ -894,6 +922,27 @@ with st.sidebar:
     st.write("")
 
     with st.container(border=True):
+        st.markdown("#### Load legacy COBOL source (optional)")
+        current_source_url = st.session_state.get("cobol_source_url")
+        if current_source_url:
+            st.caption(f"→ Currently validating against code loaded from: {current_source_url}")
+        else:
+            st.caption("→ Currently validating against the bundled "
+                       "`data/src/legacy/INTCALC.cbl`.")
+        github_url = st.text_input(
+            "GitHub URL (page link or raw link)", key="github_cobol_url",
+            placeholder="https://github.com/org/repo/blob/main/INTCALC.cbl",
+            label_visibility="collapsed",
+        )
+        load_cobol_clicked = st.button(
+            "⬇  Load COBOL from GitHub", use_container_width=True,
+        )
+        st.caption("Overwrites the local COBOL file and recompiles automatically on "
+                   "the next Run pipeline click. The rules and I/O spec below still "
+                   "describe INTCALC specifically — this is for pulling a different "
+                   "*revision* of the same program, not an unrelated one.")
+
+    with st.container(border=True):
         st.markdown("#### Choose what to test")
         scope_key = st.selectbox(
             "Scope", list(SCOPE_OPTIONS.keys()), label_visibility="collapsed",
@@ -903,12 +952,91 @@ with st.sidebar:
 
     run_clicked = st.button("▶  Run pipeline", type="primary", use_container_width=True)
 
+    prior_result = st.session_state.get("result")
+    with st.container(border=True):
+        st.markdown("#### Modify a rule & re-validate")
+        if prior_result is None:
+            st.caption(
+                "Run the pipeline once (clean) above first — then come back here to "
+                "change one rule's wording and see the generated code — and the "
+                "report — react to it. This never edits validated_rules.yaml on "
+                "disk; the change only applies to this one run."
+            )
+            rule_change_id = None
+            rule_change_text = ""
+            rule_change_clicked = False
+        else:
+            rule_change_id = st.selectbox(
+                "Rule to modify", [r.id for r in prior_result.rules],
+                label_visibility="collapsed", key="rule_change_select",
+            )
+            current_statement = next(
+                (r.statement for r in prior_result.rules if r.id == rule_change_id), "",
+            )
+            rule_change_text = st.text_area(
+                "New wording", value=current_statement, height=100,
+                label_visibility="collapsed", key=f"rule_change_text_{rule_change_id}",
+            )
+            llm_mode_rc = os.environ.get("UC04_LLM_MODE", get_config()["llm"]["mode"])
+            if llm_mode_rc == "real":
+                st.caption(
+                    "→ Regenerates the implementation from this new wording, then "
+                    "compares it against the (unchanged) legacy COBOL — a realistic "
+                    "'the requirement changed, the old system didn't' scenario."
+                )
+            else:
+                st.caption(
+                    "⚠️ Currently in **mock mode**: the generated code is a fixed "
+                    "template that ignores rule wording, so this will show no "
+                    "effect. Set `llm.mode: real` in `ai_platform/config.yaml` to "
+                    "see Claude actually implement your new wording."
+                )
+            rule_change_clicked = st.button(
+                "✏️  Modify rule & re-validate", use_container_width=True,
+            )
+
 # There is no code-variant picker any more: the scope decides whether the
 # run uses clean or deliberately flawed code (run_scope injects it), and
 # UC04_INJECT_BUG set before launch still applies to the scopes that don't.
 bug = SCOPE_OPTIONS[scope_key].get("bug") or os.environ.get("UC04_INJECT_BUG")
 
-import datetime as _dt
+
+if load_cobol_clicked:
+    if not github_url.strip():
+        st.warning("Paste a GitHub URL first.")
+    else:
+        try:
+            with st.spinner("Fetching COBOL source from GitHub..."):
+                content = fetch_cobol_source(github_url)
+            if not content.strip():
+                st.error("Fetched file is empty — check the URL.")
+            else:
+                COBOL_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+                if COBOL_SOURCE_PATH.exists():
+                    backup_path = COBOL_BACKUP_DIR / (
+                        f"INTCALC_{_dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.cbl.bak"
+                    )
+                    backup_path.write_text(COBOL_SOURCE_PATH.read_text())
+                COBOL_SOURCE_PATH.write_text(content)
+                st.session_state["cobol_source_url"] = github_url.strip()
+                st.success(
+                    f"Loaded {len(content)} characters from GitHub into "
+                    f"`data/src/legacy/INTCALC.cbl`. Click **Run pipeline** to "
+                    f"recompile it and validate against it."
+                )
+                with st.expander("Preview fetched source"):
+                    st.code(content[:3000], language="cobol")
+        except urllib.error.HTTPError as exc:
+            st.error(f"GitHub returned an error ({exc.code}) — check the URL is public and correct.")
+        except urllib.error.URLError as exc:
+            st.error(f"Couldn't reach GitHub from this environment: {exc.reason}")
+        except Exception as exc:
+            st.error(f"Failed to load COBOL source: {exc}")
+
+# There is no code-variant picker any more: the scope decides whether the
+# run uses clean or deliberately flawed code (run_scope injects it), and
+# UC04_INJECT_BUG set before launch still applies to the scopes that don't.
+bug = SCOPE_OPTIONS[scope_key].get("bug") or os.environ.get("UC04_INJECT_BUG")
 
 if run_clicked:
     # Keep the run this button-click is about to replace, so a "compare
@@ -923,6 +1051,7 @@ if run_clicked:
         st.session_state["scope"] = scope
         st.session_state["scope_key"] = scope_key   # drives the default rule filter
         st.session_state["bug"] = bug
+        st.session_state["rule_change"] = None
         run_label = f"{scope_key} · {_dt.datetime.now():%H:%M:%S}"
         st.session_state["run_label"] = run_label
 
@@ -953,6 +1082,57 @@ if run_clicked:
         "_trace": str(new_result.trace_path),
         "_bug": bug,
     })
+    # Rerun once so the sidebar's "Modify a rule & re-validate" section (which
+    # reads the just-saved result) reflects it immediately, instead of one
+    # click later.
+    st.rerun()
+
+if rule_change_clicked and rule_change_id is not None:
+    prior = st.session_state.get("result")
+    if prior is None:
+        st.warning("Run the pipeline once (clean) before modifying a rule.")
+    elif not rule_change_text.strip():
+        st.warning("Enter the new rule wording before re-validating.")
+    else:
+        st.session_state["prev_result"] = prior
+        st.session_state["prev_label"] = st.session_state.get("run_label", "previous run")
+        old_statement = next(
+            (r.statement for r in prior.rules if r.id == rule_change_id), "",
+        )
+        with st.spinner(f"Regenerating the implementation from the new wording of {rule_change_id}..."):
+            new_result = get_pipeline().modify_rule_and_revalidate(
+                rule_change_id, rule_change_text.strip(), prior.vectors, run_id="ui-rule-change",
+            )
+        st.session_state["result"] = new_result
+        st.session_state["bug"] = None
+        st.session_state["rule_change"] = {
+            "rule_id": rule_change_id, "old_statement": old_statement,
+            "new_statement": rule_change_text.strip(),
+            "mock_mode": os.environ.get("UC04_LLM_MODE", get_config()["llm"]["mode"]) != "real",
+        }
+        run_label = f"{st.session_state.get('run_label', 'previous run')} · rule changed: {rule_change_id}"
+        st.session_state["run_label"] = run_label
+
+        _f = new_result.facts
+        _judged = _f.rules_validated + _f.rules_invalidated
+        _diverged = len({d.vector_id for d in new_result.divergences})
+        _now = _dt.datetime.now()
+        st.session_state.setdefault("run_history", []).append({
+            "Time": _now.strftime("%H:%M:%S"),
+            "Scope": f"Rule changed: {rule_change_id}",
+            "Pass rate": f"{_f.rules_validated / _judged * 100:.1f}%" if _judged else "—",
+            "Succeeded": _f.rules_validated,
+            "Failed": _f.rules_invalidated,
+            "Not testable": _f.rules_uncoverable,
+            "Vectors matched": f"{(_f.total_vectors - _diverged) / _f.total_vectors * 100:.1f}%"
+                                if _f.total_vectors else "—",
+            "Divergences": _f.total_divergences,
+            "_csv": build_csv_report(new_result, f"Rule changed: {rule_change_id}", None),
+            "_filename": f"codeverus_report_rule_change_{rule_change_id.lower()}"
+                         f"_{_now:%Y%m%d_%H%M%S}.csv",
+            "_trace": str(new_result.trace_path),
+            "_bug": None,
+        })
 
 result = st.session_state.get("result")
 
@@ -962,8 +1142,26 @@ if result is None:
 
 facts = result.facts
 active_bug = st.session_state.get("bug")
+active_rule_change = st.session_state.get("rule_change")
 
-if active_bug:
+if active_rule_change:
+    if active_rule_change.get("mock_mode"):
+        st.warning(
+            f"⚠️ **Rule `{active_rule_change['rule_id']}` reworded — but this ran in "
+            f"mock mode**, so the generated code is unchanged (mock ignores rule "
+            f"wording). Switch to real mode to see Claude actually implement: "
+            f"\"{active_rule_change['new_statement']}\""
+        )
+    else:
+        st.error(
+            f"📝 **Rule `{active_rule_change['rule_id']}` reworded** — was: "
+            f"\"{active_rule_change['old_statement']}\" → now: "
+            f"\"{active_rule_change['new_statement']}\". The implementation was "
+            f"regenerated from this new wording; the frozen legacy COBOL didn't "
+            f"change, so expect a genuine divergence — a requirement-drift finding, "
+            f"not a coding mistake."
+        )
+elif active_bug:
     v = BUG_VARIANTS[active_bug]
     st.error(
         f"🐞 **Flawed code generated on purpose — `{active_bug}`:** {v['description']} "
@@ -1395,6 +1593,8 @@ with tabs[3]:
         st.code(path.read_text(), language=language, line_numbers=True)
 
     if src_choice.startswith("🗄️"):
+        if st.session_state.get("cobol_source_url"):
+            st.caption(f"→ Loaded from GitHub: {st.session_state['cobol_source_url']}")
         show_source(root / "data" / "src" / "legacy" / "INTCALC.cbl", "cobol")
     elif src_choice.startswith("📜"):
         show_source(root / "data" / "rules" / "validated_rules.yaml", "yaml")
