@@ -206,6 +206,22 @@ BUG_VARIANTS = {
         "find": "return yy >= 50 ? 1900 + yy : 2000 + yy;",
         "replace": "return yy >= 60 ? 1900 + yy : 2000 + yy; // BUG: should be 50 per R-013",
     },
+    # Unlike the half-cent tie-break R-009 leaves open - a defensible
+    # disagreement, not a defect - this one is unambiguously wrong: it
+    # rounds to the nearest DOLLAR, discarding the cents R-009 explicitly
+    # asks for. Truncating at the cent instead would only ever be a single
+    # cent out, which ai/divergence.py correctly reads as the ambiguous
+    # tie-break case (flaw side: rule); this one is off by up to a dollar,
+    # so it is diagnosed as what it really is - an implementation defect,
+    # flaw side: code. Still emits 2dp, so R-010 stays satisfied and the
+    # verdict is unambiguously about R-009.
+    "rounding_mode": {
+        "rule_id": "R-009",
+        "description": "Interest truncated to whole dollars instead of rounded to the nearest cent.",
+        "find": "return raw.setScale(2, RoundingMode.HALF_EVEN);",
+        "replace": "return raw.setScale(0, RoundingMode.DOWN).setScale(2); "
+                   "// BUG: truncates to whole dollars, drops the cents R-009 requires",
+    },
 }
 
 
