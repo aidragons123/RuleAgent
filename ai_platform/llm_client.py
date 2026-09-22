@@ -72,7 +72,12 @@ class LLMClient:
         response = self._anthropic_client.messages.create(
             model=self.model,
             max_tokens=4096,
-            temperature=self.temperature,
+            # The installed anthropic SDK's Messages.create() no longer takes
+            # temperature as a typed keyword argument (it raises TypeError:
+            # unexpected keyword argument 'temperature' if passed directly),
+            # so it's passed through extra_body instead - same effect, still
+            # forwarded to the API as a request body field.
+            extra_body={"temperature": self.temperature},
             messages=[{
                 "role": "user",
                 "content": prompt + "\n\nRespond with ONLY a single JSON object, "
