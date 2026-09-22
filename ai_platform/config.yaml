@@ -4,7 +4,7 @@
 # call. Not yours to loosen.
 
 llm:
-  mode: mock          # "mock" (offline, deterministic, default) | "real" (needs ANTHROPIC_API_KEY)
+  mode: real          # "mock" (offline, deterministic, default) | "real" (needs ANTHROPIC_API_KEY)
   model: "claude-sonnet-5"
   temperature: 0.0
   seed: 20260918
