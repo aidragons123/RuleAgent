@@ -19,6 +19,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -31,6 +32,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -41,6 +43,7 @@ from ai_platform.config import get_config  # noqa: E402
 from ai_platform.tracer import Tracer as _Tracer  # noqa: E402
 from core import cobol_runner as _cobol_runner  # noqa: E402
 from core.harness import coverage_from_matrix  # noqa: E402
+from core.models import BusinessRule  # noqa: E402
 from core.java_runner import JavaGeneratedModule, JavaRunnerError  # noqa: E402
 from core.pipeline import Pipeline, load_heldback_vectors, load_seed_vectors  # noqa: E402
 from core.rules_loader import load_signature  # noqa: E402
@@ -178,6 +181,14 @@ st.markdown(
     .div-box.actual { background:#fbeaea; border:1px solid #d03b3b33; }
     .div-box .div-box-label { font-size:.72rem; font-weight:700; letter-spacing:.03em; text-transform:uppercase; opacity:.7; }
     .div-box .div-box-value { font-size:1.15rem; font-weight:800; font-family: monospace; margin-top:.1rem; }
+    /* which rule a divergence belongs to */
+    .rule-row { margin-top:.55rem; display:flex; align-items:center; gap:.35rem; flex-wrap:wrap; }
+    .rule-lead { font-size:.8rem; color:#6b7280; }
+    .rule-badge {
+        display:inline-block; font-size:.76rem; font-weight:700; padding:.14rem .5rem;
+        border-radius:6px; background:#eef2f8; color:#3a4453; border:1px solid #dfe5ee;
+    }
+    .rule-stmt { font-size:.82rem; color:#5a6472; margin-top:.35rem; line-height:1.45; }
 
     /* --------------------------------------------------- result scoreboard */
     .score-panel {
@@ -342,6 +353,43 @@ st.markdown(
         color: #9aa0ab !important;
     }
 
+    /* ------------------------------------------------ sidebar: brand + steps */
+    .sb-brand {
+        display:flex; align-items:center; gap:.7rem;
+        padding:.2rem 0 1.1rem; margin-bottom:.4rem;
+        border-bottom:1px solid #ffffff1f;
+    }
+    .sb-mark {
+        width:40px; height:40px; flex:none; border-radius:11px;
+        background:linear-gradient(135deg,#e0503a 0%,#d6402e 100%);
+        color:#fff !important; font-weight:800; font-size:.95rem; letter-spacing:.02em;
+        display:flex; align-items:center; justify-content:center;
+        box-shadow:0 4px 12px rgba(214,64,46,.35);
+    }
+    .sb-name { font-size:1.12rem; font-weight:800; line-height:1.15; letter-spacing:.01em; }
+    .sb-tag  { font-size:.72rem; color:#9fb0c4 !important; margin-top:.1rem; }
+
+    .sb-step {
+        display:flex; align-items:center; gap:.5rem;
+        font-size:.7rem; font-weight:800; letter-spacing:.11em; text-transform:uppercase;
+        color:#9fb0c4 !important; margin:.95rem 0 .4rem;
+    }
+    .sb-num {
+        width:19px; height:19px; flex:none; border-radius:50%;
+        background:#ffffff1a; border:1px solid #ffffff33;
+        color:#e8eef5 !important; font-size:.66rem; font-weight:800; letter-spacing:0;
+        display:flex; align-items:center; justify-content:center;
+    }
+    .sb-opt {
+        font-size:.6rem; font-weight:700; letter-spacing:.06em; padding:.08rem .38rem;
+        border-radius:4px; background:#ffffff14; color:#8fa2b8 !important;
+    }
+    .sb-note { font-size:.78rem; color:#c3d2e2 !important; line-height:1.45; margin:.1rem 0 .5rem; }
+    .sb-note code { background:#ffffff1a !important; color:#dbe7f3 !important; }
+    .sb-hint { font-size:.71rem; color:#8fa2b8 !important; line-height:1.4; margin-top:.45rem; }
+
+    .sb-cta { margin-top:1.15rem; }
+
     /* ---------------------------------------------------- colored sidebar */
     section[data-testid="stSidebar"],
     section[data-testid="stSidebar"] > div {
@@ -357,21 +405,16 @@ st.markdown(
     section[data-testid="stSidebar"] hr {
         border-color: #ffffff2a !important;
     }
-    /* Card-grouped sections (st.container(border=True)) inside the sidebar */
+    /* Card-grouped sections (st.container(border=True)) inside the sidebar.
+       One consistent card treatment — the numbered step headings above each
+       card carry the sequence now, so the old per-card accent stripes were
+       decoration competing with them. */
     section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
-        background: #ffffff0f !important;
-        border: 1px solid #ffffff26 !important;
-        border-left: 4px solid #f0b23e !important;
+        background: #ffffff0d !important;
+        border: 1px solid #ffffff1f !important;
         border-radius: 12px !important;
-        padding: .3rem .4rem !important;
-        margin-bottom: .9rem !important;
-    }
-    /* Slight color variety between the sidebar sections — no blue */
-    section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(2) {
-        border-left-color: #e0729c !important;
-    }
-    section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(3) {
-        border-left-color: #8b6fd1 !important;
+        padding: .75rem .85rem !important;
+        margin-bottom: .2rem !important;
     }
     /* The scope dropdown reads better as a light control against the dark panel */
     section[data-testid="stSidebar"] [data-baseweb="select"] > div {
@@ -387,6 +430,25 @@ st.markdown(
     [data-baseweb="popover"] [role="listbox"] * {
         color: #000000 !important;
     }
+    /* Text boxes (the new-rule YAML, the GitHub URL). The blanket
+       "sidebar * = light text" rule above would otherwise paint what you
+       type in near-white on a white field. */
+    section[data-testid="stSidebar"] textarea,
+    section[data-testid="stSidebar"] input[type="text"] {
+        background: #ffffff !important;
+        color: #000000 !important;
+        border-radius: 8px !important;
+        border: 1px solid #ffffff40 !important;
+        -webkit-text-fill-color: #000000 !important;   /* Safari/Chrome autofill */
+    }
+    section[data-testid="stSidebar"] textarea {
+        font-family: ui-monospace, Consolas, monospace !important;
+        font-size: .82rem !important;
+    }
+    section[data-testid="stSidebar"] textarea::placeholder,
+    section[data-testid="stSidebar"] input[type="text"]::placeholder {
+        color: #8a94a1 !important; -webkit-text-fill-color: #8a94a1 !important;
+    }
     section[data-testid="stSidebar"] .stCaption, section[data-testid="stSidebar"] small {
         color: #b9cbe0 !important;
     }
@@ -400,6 +462,30 @@ st.markdown(
         background: linear-gradient(120deg, #e0503a 0%, #d6402e 100%) !important;
         border: none !important;
         font-weight: 700 !important;
+        border-radius: 9px !important;
+        transition: transform .12s ease, box-shadow .12s ease !important;
+    }
+    section[data-testid="stSidebar"] .stButton button:hover,
+    [data-testid="stMain"] .stButton button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 16px rgba(214,64,46,.35) !important;
+    }
+    /* The secondary action in step 1 shouldn't compete with Run pipeline */
+    section[data-testid="stSidebar"] .stButton button[kind="secondary"] {
+        background: #ffffff14 !important;
+        border: 1px solid #ffffff2e !important;
+        font-weight: 600 !important;
+        font-size: .82rem !important;
+    }
+    section[data-testid="stSidebar"] .stButton button[kind="secondary"]:hover {
+        background: #ffffff22 !important; box-shadow: none !important;
+    }
+    /* Run pipeline: the one primary action, given real presence */
+    section[data-testid="stSidebar"] .stButton button[kind="primary"] {
+        padding: .62rem 1rem !important;
+        font-size: .95rem !important;
+        letter-spacing: .01em;
+        box-shadow: 0 4px 14px rgba(214,64,46,.3) !important;
     }
     /* Don't force color on icon glyphs / svg fills, they carry their own. */
     section[data-testid="stSidebar"] svg,
@@ -508,9 +594,55 @@ def _install_fast_differential() -> None:
     lock = threading.Lock()
 
     # ---------------------------------------------------------- COBOL side
+    oracle_binary: dict = {}        # {source_mtime_ns: (key, binary_path)}
+
+    def ensure_oracle_binary() -> tuple[str, Path]:
+        """Compiles the COBOL oracle at most once per source revision, and
+        returns (content hash, path).
+
+        Two traps this works around, which together made every run crawl:
+
+        1. core/cobol_runner.ensure_compiled() decides staleness by
+           comparing the binary's mtime to INTCALC.cbl's. On Windows cobc
+           emits `intcalc.exe`, while cobol_runner looks for extensionless
+           `intcalc`, so once the source is newer than that stale copy the
+           check can NEVER go true again — every call recompiles (~0.7 s).
+           A git checkout that rewrites INTCALC.cbl is enough to trigger it.
+           So after compiling we copy the .exe over the extensionless name.
+        2. This used to run per oracle lookup, turning one stale timestamp
+           into one compile per vector. It is now keyed on the source's
+           mtime, so a run compiles once and reuses the result."""
+        stamp = _cobol_runner.SOURCE.stat().st_mtime_ns
+        cached = oracle_binary.get(stamp)
+        if cached:
+            return cached
+        with lock:
+            cached = oracle_binary.get(stamp)
+            if cached:
+                return cached
+            binary = _cobol_runner.ensure_compiled()
+            # Windows: cobc actually produced intcalc.exe. Keep the name
+            # cobol_runner looks for in sync, or it stays permanently stale.
+            produced = binary.with_suffix(".exe")
+            if produced.exists() and (not binary.exists()
+                                      or produced.stat().st_mtime > binary.stat().st_mtime):
+                shutil.copy2(produced, binary)
+            # Key on the SOURCE, not on the compiled bytes. What the oracle
+            # answers is determined by INTCALC.cbl (+ its copybook); the
+            # binary is just one build of it, and cobc does not produce a
+            # byte-identical .exe twice. Hashing the binary meant every
+            # rebuild looked like a different oracle and silently threw the
+            # whole cache away — which is why three cache files had piled up
+            # for what is really one unchanged program.
+            key = _digest(*(p.read_bytes() for p in sorted(
+                _cobol_runner.LEGACY_DIR.glob("*.cbl")) + sorted(
+                _cobol_runner.LEGACY_DIR.glob("*.cpy"))))
+            entry = (key, binary)
+            oracle_binary[stamp] = entry
+            return entry
+
     def oracle_bucket() -> tuple[str, dict]:
-        binary = _cobol_runner.ensure_compiled()   # rebuilds if INTCALC.cbl changed
-        key = _digest(binary.read_bytes())
+        key, _ = ensure_oracle_binary()
         if key not in oracle_memo:
             with lock:
                 oracle_memo[key] = _load_disk_cache(f"oracle_{key}")
@@ -578,8 +710,10 @@ def _install_fast_differential() -> None:
         return compiled[key]
 
     def java_bucket(module) -> tuple[str, dict]:
-        classes = sorted(Path(module.build_dir).glob("*.class"))
-        key = _digest(*(p.read_bytes() for p in classes))
+        # Same reasoning as the oracle: key on the generated source that
+        # produced this build dir (its name IS that source's hash), not on
+        # .class bytes, which javac need not reproduce byte-for-byte.
+        key = Path(module.build_dir).name
         if key not in java_memo:
             java_memo[key] = _load_disk_cache(f"java_{key}")
         return key, java_memo[key]
@@ -750,6 +884,65 @@ def scope_matrix(result, rule_ids: list[str]):
     return _dc_replace(result, facts=facts)
 
 
+# Shown pre-filled in the sidebar, so the expected shape is obvious without
+# anyone opening validated_rules.yaml. It deliberately describes the
+# interest cap — the one behaviour the COBOL has and no rule documents — so
+# the default demo is "write down the missing rule, re-run, watch the
+# untraceable finding become a traceable one".
+SAMPLE_NEW_RULE = """\
+id: R-025
+statement: >
+  Interest for tier-3 accounts is capped at 500.00. Any computed
+  interest above that ceiling is reported as exactly 500.00.
+fields:
+  - interest
+  - capped
+"""
+
+
+def parse_new_rule(text: str) -> BusinessRule:
+    """Turns the sidebar YAML into a BusinessRule, with errors phrased for
+    someone editing a text box rather than reading a stack trace."""
+    try:
+        raw = yaml.safe_load(text)
+    except Exception as exc:
+        raise ValueError(f"not valid YAML: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("expected a single rule as `key: value` lines.")
+    missing = [k for k in ("id", "statement") if not str(raw.get(k, "")).strip()]
+    if missing:
+        raise ValueError(f"missing required field(s): {', '.join(missing)}")
+    fields = raw.get("fields") or []
+    if isinstance(fields, str):
+        fields = [f.strip() for f in fields.split(",") if f.strip()]
+    return BusinessRule(
+        id=str(raw["id"]).strip(),
+        statement=" ".join(str(raw["statement"]).split()),
+        fields=[str(f).strip() for f in fields],
+        note=str(raw.get("note", "")).strip(),
+    )
+
+
+@contextmanager
+def extra_rules(pipeline, rules: list[BusinessRule]):
+    """Adds rules to the pipeline for ONE run, then puts it back.
+
+    get_pipeline() is a cached singleton shared by every run, so mutating
+    its rule list permanently would leak an experimental rule into every
+    later run. Both `rules` and `rules_by_id` have to move together — the
+    citation resolver reads the latter."""
+    if not rules:
+        yield
+        return
+    original, original_by_id = pipeline.rules, pipeline.rules_by_id
+    try:
+        pipeline.rules = list(original) + list(rules)
+        pipeline.rules_by_id = {r.id: r for r in pipeline.rules}
+        yield
+    finally:
+        pipeline.rules, pipeline.rules_by_id = original, original_by_id
+
+
 def exercised_rules(result) -> list[str]:
     """The rules a run actually exercised — those with at least one citing
     test vector. The pipeline always builds the matrix over all 24 rules,
@@ -775,36 +968,44 @@ def injected_bug(bug: str | None):
             os.environ["UC04_INJECT_BUG"] = previous
 
 
-def run_scope(scope: str):
+def run_scope(scope: str, added: list[BusinessRule] | None = None):
     pipeline = get_pipeline()
     heldback = load_heldback_vectors()
     seed = load_seed_vectors()
+    added = added or []
+    added_ids = [r.id for r in added]
 
-    if scope == "Full run (all 24 rules, all vectors)":
-        return pipeline.run(include_synthesised=True, extra_vectors=seed + heldback,
-                             run_id="ui-full")
-    if scope == "Happy flow (clean path)":
-        # Synthesise vectors for the in-scope rules only, then narrow the
-        # matrix to them: 20 vectors, 0 divergences, 9 of 9 validated.
-        result = pipeline.run(include_synthesised=True, extra_vectors=[], run_id="ui-happy",
-                               synthesis_rule_ids=HAPPY_FLOW_RULES)
-        return scope_matrix(result, HAPPY_FLOW_RULES)
-    if scope == "Rounding flaw (R-009)":
-        # The negative counterpart to the happy flow: regenerate the Java
-        # with a real rounding defect in it, then run R-009's own vectors
-        # plus the seed set so the damage is visible across many inputs.
-        with injected_bug("rounding_mode"):
-            result = pipeline.run(include_synthesised=True, extra_vectors=seed,
-                                   run_id="ui-rounding", synthesis_rule_ids=["R-009"])
-        return scope_matrix(result, exercised_rules(result))
-    if scope == "Untraceable cap behaviour":
-        # Clean code, but only the vectors that trip the undocumented
-        # interest cap — so what is left is the behaviour no rule explains.
-        cap_vectors = [v for v in heldback if "cap" in v.note.lower()]
-        result = pipeline.run(include_synthesised=False, extra_vectors=cap_vectors,
-                               run_id="ui-untraceable")
-        return scope_matrix(result, exercised_rules(result))
-    raise ValueError(scope)
+    with extra_rules(pipeline, added):
+        if scope == "Full run (all 24 rules, all vectors)":
+            return pipeline.run(include_synthesised=True, extra_vectors=seed + heldback,
+                                 run_id="ui-full")
+        if scope == "Happy flow (clean path)":
+            # Synthesise vectors for the in-scope rules only, then narrow the
+            # matrix to them: 20 vectors, 0 divergences, 9 of 9 validated.
+            # An added rule joins the scope, or it would be invisible here.
+            ids = HAPPY_FLOW_RULES + added_ids
+            result = pipeline.run(include_synthesised=True, extra_vectors=[],
+                                   run_id="ui-happy", synthesis_rule_ids=ids)
+            return scope_matrix(result, ids)
+        if scope == "Rounding flaw (R-009)":
+            # The negative counterpart to the happy flow: regenerate the Java
+            # with a real rounding defect in it, then run R-009's own vectors
+            # plus the seed set so the damage is visible across many inputs.
+            with injected_bug("rounding_mode"):
+                result = pipeline.run(include_synthesised=True, extra_vectors=seed,
+                                       run_id="ui-rounding",
+                                       synthesis_rule_ids=["R-009"] + added_ids)
+            return scope_matrix(result, exercised_rules(result))
+        if scope == "Untraceable cap behaviour":
+            # Clean code, but only the vectors that trip the undocumented
+            # interest cap — so what is left is the behaviour no rule explains.
+            cap_vectors = [v for v in heldback if "cap" in v.note.lower()]
+            result = pipeline.run(include_synthesised=bool(added_ids),
+                                   extra_vectors=cap_vectors,
+                                   run_id="ui-untraceable",
+                                   synthesis_rule_ids=added_ids or None)
+            return scope_matrix(result, exercised_rules(result) + added_ids)
+        raise ValueError(scope)
 
 
 # ---------------------------------------------------------- CSV report
@@ -917,18 +1118,21 @@ SCOPE_OPTIONS = {
 }
 
 with st.sidebar:
-    st.markdown("## CodeVerus")
-    st.caption("AI COBOL modernization & rule validation")
-    st.write("")
+    # Brand block — a monogram and a one-line positioning statement, so the
+    # panel opens with what this is rather than a bare heading.
+    st.markdown(
+        '<div class="sb-brand">'
+        '  <div class="sb-mark">CV</div>'
+        '  <div><div class="sb-name">CodeVerus</div>'
+        '  <div class="sb-tag">Legacy COBOL · verified modernisation</div></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
+    st.markdown('<div class="sb-step"><span class="sb-num">1</span>'
+                'Legacy source <span class="sb-opt">optional</span></div>',
+                unsafe_allow_html=True)
     with st.container(border=True):
-        st.markdown("#### Load legacy COBOL source (optional)")
-        current_source_url = st.session_state.get("cobol_source_url")
-        if current_source_url:
-            st.caption(f"→ Currently validating against code loaded from: {current_source_url}")
-        else:
-            st.caption("→ Currently validating against the bundled "
-                       "`data/src/legacy/INTCALC.cbl`.")
         github_url = st.text_input(
             "GitHub URL (page link or raw link)", key="github_cobol_url",
             placeholder="https://github.com/org/repo/blob/main/INTCALC.cbl",
@@ -937,63 +1141,40 @@ with st.sidebar:
         load_cobol_clicked = st.button(
             "⬇  Load COBOL from GitHub", use_container_width=True,
         )
-        st.caption("Overwrites the local COBOL file and recompiles automatically on "
-                   "the next Run pipeline click. The rules and I/O spec below still "
-                   "describe INTCALC specifically — this is for pulling a different "
-                   "*revision* of the same program, not an unrelated one.")
+        st.markdown('<div class="sb-hint">Pulls a different <i>revision</i> of the same '
+                    'program. Recompiles on the next run.</div>', unsafe_allow_html=True)
 
+    st.markdown('<div class="sb-step"><span class="sb-num">2</span>'
+                'What to test</div>', unsafe_allow_html=True)
     with st.container(border=True):
-        st.markdown("#### Choose what to test")
         scope_key = st.selectbox(
             "Scope", list(SCOPE_OPTIONS.keys()), label_visibility="collapsed",
         )
         scope = SCOPE_OPTIONS[scope_key]["value"]
-        st.caption(SCOPE_OPTIONS[scope_key]["help"])
+        st.markdown(f'<div class="sb-note">{SCOPE_OPTIONS[scope_key]["help"]}</div>',
+                    unsafe_allow_html=True)
 
-    run_clicked = st.button("▶  Run pipeline", type="primary", use_container_width=True)
-
-    prior_result = st.session_state.get("result")
+    st.markdown('<div class="sb-step"><span class="sb-num">3</span>'
+                'Add a rule <span class="sb-opt">optional</span></div>',
+                unsafe_allow_html=True)
     with st.container(border=True):
-        st.markdown("#### Modify a rule & re-validate")
-        if prior_result is None:
-            st.caption(
-                "Run the pipeline once (clean) above first — then come back here to "
-                "change one rule's wording and see the generated code — and the "
-                "report — react to it. This never edits validated_rules.yaml on "
-                "disk; the change only applies to this one run."
-            )
-            rule_change_id = None
-            rule_change_text = ""
-            rule_change_clicked = False
-        else:
-            rule_change_id = st.selectbox(
-                "Rule to modify", [r.id for r in prior_result.rules],
-                label_visibility="collapsed", key="rule_change_select",
-            )
-            current_statement = next(
-                (r.statement for r in prior_result.rules if r.id == rule_change_id), "",
-            )
-            rule_change_text = st.text_area(
-                "New wording", value=current_statement, height=100,
-                label_visibility="collapsed", key=f"rule_change_text_{rule_change_id}",
-            )
-            llm_mode_rc = os.environ.get("UC04_LLM_MODE", get_config()["llm"]["mode"])
-            if llm_mode_rc == "real":
-                st.caption(
-                    "→ Regenerates the implementation from this new wording, then "
-                    "compares it against the (unchanged) legacy COBOL — a realistic "
-                    "'the requirement changed, the old system didn't' scenario."
-                )
-            else:
-                st.caption(
-                    "⚠️ Currently in **mock mode**: the generated code is a fixed "
-                    "template that ignores rule wording, so this will show no "
-                    "effect. Set `llm.mode: real` in `ai_platform/config.yaml` to "
-                    "see Claude actually implement your new wording."
-                )
-            rule_change_clicked = st.button(
-                "✏️  Modify rule & re-validate", use_container_width=True,
-            )
+        new_rule_text = st.text_area(
+            "New rule (YAML)", value=SAMPLE_NEW_RULE, height=170,
+            label_visibility="collapsed", key="new_rule_yaml",
+        )
+        add_rule_on = st.checkbox("Include this rule in the next run",
+                                  value=False, key="new_rule_enabled")
+
+    st.markdown('<div class="sb-cta">', unsafe_allow_html=True)
+    run_clicked = st.button("▶  Run pipeline", type="primary", use_container_width=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# The "Modify a rule & re-validate" sidebar panel is hidden. Everything it
+# drove is left intact — core/pipeline.py's modify_rule_and_revalidate and
+# the handler further down — so restoring the panel is the only change
+# needed to bring the feature back. These stubs keep that handler inert.
+rule_change_id, rule_change_text, rule_change_clicked = None, "", False
 
 # There is no code-variant picker any more: the scope decides whether the
 # run uses clean or deliberately flawed code (run_scope injects it), and
@@ -1045,14 +1226,28 @@ if run_clicked:
         st.session_state["prev_result"] = st.session_state["result"]
         st.session_state["prev_label"] = st.session_state.get("run_label", "previous run")
 
+    # Parse the sidebar rule before the spinner, so a typo surfaces as a
+    # plain message instead of aborting mid-run. The message is stashed in
+    # session state rather than rendered here: this block ends in
+    # st.rerun(), which throws away everything drawn during this pass.
+    added_rules: list[BusinessRule] = []
+    st.session_state["new_rule_error"] = None
+    if add_rule_on:
+        try:
+            added_rules = [parse_new_rule(new_rule_text)]
+        except ValueError as exc:
+            st.session_state["new_rule_error"] = str(exc)
+
     with st.spinner(f"Running: {scope}..."):
-        new_result = run_scope(scope)
+        new_result = run_scope(scope, added_rules)
         st.session_state["result"] = new_result
         st.session_state["scope"] = scope
         st.session_state["scope_key"] = scope_key   # drives the default rule filter
         st.session_state["bug"] = bug
         st.session_state["rule_change"] = None
-        run_label = f"{scope_key} · {_dt.datetime.now():%H:%M:%S}"
+        st.session_state["added_rules"] = [r.model_dump() for r in added_rules]
+        label_extra = f" + {added_rules[0].id}" if added_rules else ""
+        run_label = f"{scope_key}{label_extra} · {_dt.datetime.now():%H:%M:%S}"
         st.session_state["run_label"] = run_label
 
     _f = new_result.facts
@@ -1172,6 +1367,27 @@ else:
     st.success("✅ **Clean generated code** — no bug injected. Any divergence below "
                "is a genuine ambiguous-rule, rounding, or untraceable-behaviour finding, "
                "not an implementation defect.")
+
+if st.session_state.get("new_rule_error"):
+    st.error(
+        f"⚠️ **New rule not added — {st.session_state['new_rule_error']}**  "
+        f"The run below continued without it. Fix the YAML in the sidebar and run again."
+    )
+
+# What the added rule did — the whole reason for adding one is to see this.
+for _raw in st.session_state.get("added_rules", []):
+    _row = next((x for x in facts.traceability if x.rule_id == _raw["id"]), None)
+    if _row is None:
+        st.info(f"➕ **Rule `{_raw['id']}` was added**, but this scope's report does not "
+                f"cover it. Try **Full run** to see its verdict.")
+    else:
+        _m = STATUS_META[_row.status]
+        st.info(
+            f"➕ **Rule `{_row.rule_id}` added for this run** → {_m['icon']} "
+            f"**{_m['label']}** · {len(_row.tests)} test vector(s) synthesised for it · "
+            f"code implementing it: **{', '.join(_row.code_citations) or 'none'}**\n\n"
+            f"_{_row.statement}_"
+        )
 
 # The untraceable scope's whole point is these findings, so they lead rather
 # than sitting three tabs away.
@@ -1543,12 +1759,47 @@ with tabs[1]:
     st.subheader("Divergence gallery")
     st.caption("Every field-level disagreement between the compiled COBOL oracle and the "
                "generated modern code, for every test vector run.")
+
+    _rules_by_id = {r.id: r for r in result.rules}
+    _diag_by_key = {(x.vector_id, x.field): x for x in result.diagnoses}
+
     for d in result.divergences[:50]:
+        # A vector can cite several rules, but a divergence only counts
+        # against the rule that actually claims the field that differs —
+        # the same ownership test core/traceability.py applies. Showing
+        # both avoids implying an untouched rule is at fault.
+        owning = [r for r in d.rule_ids
+                  if r in _rules_by_id and d.field in _rules_by_id[r].fields]
+        other = [r for r in d.rule_ids if r not in owning]
+        diag = _diag_by_key.get((d.vector_id, d.field))
+
+        # No badge when a rule owns the field — the statement line below
+        # already names it. The row only appears when there is something
+        # the statement line cannot say.
+        parts = []
+        if not owning:
+            parts.append('<span class="rule-lead">no rule in this run claims '
+                         f'<code>{d.field}</code></span>')
+        if other:
+            parts.append('<span class="rule-lead">also cited by:</span> '
+                         + "".join(f'<span class="rule-badge">{r}</span>' for r in other))
+        rule_line = (f'<div class="rule-row">{" · ".join(parts)}</div>' if parts else "")
+
+        stmt = ""
+        if owning:
+            s = _rules_by_id[owning[0]].statement
+            stmt = f'<div class="rule-stmt">{owning[0]}: “{" ".join(s.split())}”</div>'
+        cause = ""
+        if diag:
+            cause = (f'<div class="rule-stmt"><b>Diagnosed:</b> '
+                     f'<code>{diag.cause}</code></div>')
+
         st.markdown(
             f"""
             <div class="div-card">
                 <span class="div-field-badge">{d.vector_id}</span>
                 &nbsp; field <span class="div-field-badge">{d.field}</span>
+                {rule_line}{stmt}{cause}
                 <div class="div-compare">
                     <div class="div-box expected">
                         <div class="div-box-label">🗄️ COBOL (expected)</div>
@@ -1599,11 +1850,79 @@ with tabs[3]:
     elif src_choice.startswith("📜"):
         show_source(root / "data" / "rules" / "validated_rules.yaml", "yaml")
     else:
-        show_source(root / "generated" / "GeneratedIntcalc.java", "java")
+        generated_java = root / "generated" / "GeneratedIntcalc.java"
+        show_source(generated_java, "java")
         st.caption("This file is regenerated fresh on every run and is intentionally "
                    "**not** committed to git — it's disposable AI output, not a trusted "
                    "static artifact. The legacy COBOL and the rules file, by contrast, "
                    "are permanent and version-controlled.")
+
+        # ---- keep a copy of a version you trust -------------------------
+        # generated/ is overwritten by the next run, so anything worth
+        # keeping has to be copied out deliberately.
+        st.divider()
+        st.markdown("#### 💾 Save this version")
+
+        if active_bug:
+            st.error(
+                f"⚠️ **This run used deliberately flawed code** (`{active_bug}`: "
+                f"{BUG_VARIANTS[active_bug]['description']}) — it is NOT a version worth "
+                f"keeping as correct. Run a clean scope (Full run or Happy flow) first."
+            )
+        else:
+            st.caption(
+                f"This run was clean: **{n_ok} of {n_rules} rules validated**, "
+                f"{n_bad} invalidated. Saving writes a timestamped copy so a later run "
+                f"can't overwrite it."
+            )
+
+        save_dir = st.text_input(
+            "Folder to save into",
+            value=str(root / "approved"),
+            help="Absolute or relative path. Created if it doesn't exist.",
+            key="save_java_dir",
+        )
+        keep_name = st.text_input(
+            "File name",
+            value=(f"GeneratedIntcalc_{st.session_state.get('scope_key', 'run')}"
+                   f"_{_dt.datetime.now():%Y%m%d_%H%M%S}.java").replace(" ", "_"),
+            key="save_java_name",
+        )
+
+        if st.button("💾  Save generated code to folder", use_container_width=True,
+                     key="save_java_btn"):
+            if not generated_java.exists():
+                st.error("No generated file on disk yet — run the pipeline first.")
+            else:
+                try:
+                    target_dir = Path(save_dir).expanduser()
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    target = target_dir / keep_name
+                    shutil.copy2(generated_java, target)
+                    # A .java file alone does not record which rules it passed,
+                    # or whether a bug was injected into it. Save that beside
+                    # it, or a kept copy is unidentifiable a week later.
+                    meta = target.with_suffix(".txt")
+                    meta.write_text(
+                        f"CodeVerus - saved generated implementation\n"
+                        f"Saved at      : {_dt.datetime.now():%Y-%m-%d %H:%M:%S}\n"
+                        f"Scope         : {st.session_state.get('scope_key', '?')}\n"
+                        f"Code variant  : "
+                        f"{'FLAWED ON PURPOSE - ' + active_bug if active_bug else 'clean'}\n"
+                        f"Rules         : {n_ok} validated / {n_bad} invalidated / "
+                        f"{n_na} not testable  (of {n_rules} in scope)\n"
+                        f"Vectors       : {n_vec_ok} of {n_vec} matched the COBOL oracle\n"
+                        f"Divergences   : {facts.total_divergences} field-level\n"
+                        f"Source file   : {generated_java}\n",
+                        encoding="utf-8",
+                    )
+                    st.success(
+                        f"✅ Saved to **{target}**\n\n"
+                        f"A `{meta.name}` alongside it records the scope, the verdict "
+                        f"counts and whether the code was clean."
+                    )
+                except Exception as exc:
+                    st.error(f"Could not save: {exc}")
 
 with tabs[4]:
     st.divider()
