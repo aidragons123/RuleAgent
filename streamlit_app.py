@@ -1580,7 +1580,7 @@ if n_bad or n_na:
 
 st.write("")
 
-tabs = st.tabs(["✅ Rule results", "🔬 Divergences & findings", "📄 Evidence pack",
+tabs = st.tabs(["✅ Rule results", "🔬 Divergences & findings",
                 "🧾 Data & source", "🕘 History & downloads"])
 
 with tabs[0]:
@@ -1635,7 +1635,7 @@ with tabs[0]:
                     if d.fix_suggested:
                         st.caption(f"  Suggested: {d.fix_suggested}")
 
-with tabs[3]:
+with tabs[2]:
     st.subheader("Every test vector used in this run")
     st.caption(
         "The actual inputs fed to both the COBOL oracle and the generated code — "
@@ -1656,7 +1656,7 @@ with tabs[3]:
     else:
         st.info("No test vectors recorded for this run.")
 
-with tabs[4]:
+with tabs[3]:
     st.subheader("Compare this run with the previous one")
     prev = st.session_state.get("prev_result")
     if prev is None:
@@ -1697,7 +1697,7 @@ with tabs[4]:
         else:
             st.success("No rule changed status between these two runs.")
 
-with tabs[4]:
+with tabs[3]:
     st.divider()
     st.subheader("Run history (this session)")
     history = st.session_state.get("run_history", [])
@@ -1746,13 +1746,6 @@ with tabs[1]:
         st.success("None found in this run's vector set.")
     for f in facts.untraceable_findings:
         st.warning(f"**{f.id}**: {f.description}")
-        st.caption(f"Triggering vectors: {', '.join(f.triggering_vectors)}")
-
-with tabs[2]:
-    st.subheader("Change-approval evidence pack sections")
-    for kind, text in result.sections.items():
-        st.markdown(f"**{kind.replace('_', ' ').title()}**")
-        st.write(text)
 
 with tabs[1]:
     st.divider()
@@ -1820,7 +1813,7 @@ with tabs[1]:
     if len(result.divergences) > 50:
         st.caption(f"... and {len(result.divergences) - 50} more. See the HTML trace for all of them.")
 
-with tabs[3]:
+with tabs[2]:
     st.divider()
     st.subheader("Legacy code, business rules, and the AI-generated replacement")
     st.caption("Shown live from disk — the Java below is exactly what this run just "
@@ -1924,7 +1917,7 @@ with tabs[3]:
                 except Exception as exc:
                     st.error(f"Could not save: {exc}")
 
-with tabs[4]:
+with tabs[3]:
     st.divider()
     st.subheader("Reports from this run")
     st.write(f"HTML trace: `{result.trace_path}`")

@@ -1,0 +1,8 @@
+CodeVerus - saved generated implementation
+Saved at      : 2026-09-23 14:03:53
+Scope         : Full run
+Code variant  : clean
+Rules         : 9 validated / 7 invalidated / 8 not testable  (of 24 in scope)
+Vectors       : 133 of 279 matched the COBOL oracle
+Divergences   : 279 field-level
+Source file   : C:\Users\GenAICHNSIRUSR123\RuleAgent\generated\GeneratedIntcalc.java
