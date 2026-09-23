@@ -1,0 +1,118 @@
+# wirepay_io_signature.yaml
+# The input/output contract for WIREPAY (domestic outbound wire
+# payment processing). Field names, types and widths - everything a
+# reimplementation generates must honour this exactly, the same way
+# io_signature.yaml is authoritative for INTCALC.
+#
+# Wire protocol: one pipe-delimited ASCII line in, one pipe-delimited
+# ASCII line out (see data/src/legacy/WIREPAY.cbl). This file is the
+# schema for both sides of that line.
+
+protocol:
+  delimiter: "|"
+  encoding: ascii
+
+inputs:
+  - name: payment_id
+    field: PAYMENT-ID
+    type: string
+    width: 10
+    notes: Caller-assigned reference number. Carried through unchanged; not itself business-meaningful.
+
+  - name: originating_account
+    field: ORIG-ACCT
+    type: string
+    width: 10
+    notes: Account being debited. Carried through unchanged.
+
+  - name: beneficiary_account
+    field: BENE-ACCT
+    type: string
+    width: 10
+    notes: Account being credited at the receiving bank. Carried through unchanged.
+
+  - name: beneficiary_routing
+    field: BENE-ROUTING
+    type: string
+    width: 9
+    notes: >
+      Beneficiary bank's routing number. Must be exactly 9 numeric
+      digits (R-WP-001) - anything else rejects the payment.
+
+  - name: amount
+    field: AMOUNT
+    type: decimal
+    scale: 2
+    signed: false
+    width: 11
+    comp3: true
+    notes: >
+      Wire amount in USD, before fees. Stored internally as
+      PIC S9(9)V99 COMP-3. Must be strictly positive (R-WP-002).
+
+  - name: submit_hh
+    field: SUBMIT-HH
+    type: string
+    width: 2
+    notes: Two-digit submission hour, 00-23, local processing time. See R-WP-008 for the cutoff.
+
+  - name: submit_mm
+    field: SUBMIT-MM
+    type: string
+    width: 2
+    notes: Two-digit submission minute, 00-59.
+
+  - name: priority_flag
+    field: PRIORITY-FLAG
+    type: string
+    width: 1
+    domain: ["Y", "N"]
+    notes: >
+      "Y" requests expedited (priority) processing - adds a
+      surcharge, see R-WP-004.
+
+outputs:
+  - name: status
+    field: STATUS
+    type: string
+    width: 8
+    domain: ["ACCEPTED", "REJECTED"]
+
+  - name: reject_reason
+    field: REJECT-REASON
+    type: string
+    width: 16
+    domain: ["", "INVALID_ROUTING", "INVALID_AMOUNT"]
+    notes: Blank when status is ACCEPTED.
+
+  - name: total_fee
+    field: TOTAL-FEE
+    type: decimal
+    scale: 2
+    signed: true
+    comp3: true
+    notes: >
+      Sum of the base fee (R-WP-003), the priority surcharge
+      (R-WP-004) and the compliance-monitoring surcharge (R-WP-005).
+      Zero for a rejected payment. The compliance surcharge is
+      computed and rounded (half-cent ties resolved away from zero,
+      per COBOL ROUNDED semantics) inside the oracle - the rounding
+      MODE is deliberately not restated in wirepay_rules.yaml, same
+      pattern as INTCALC's R-009 ambiguity note.
+
+  - name: total_debit
+    field: TOTAL-DEBIT
+    type: decimal
+    scale: 2
+    signed: true
+    comp3: true
+    notes: amount + total_fee for an accepted payment; zero for a rejected one.
+
+  - name: value_date_offset
+    field: VALUE-DATE-OFFSET
+    type: int
+    width: 1
+    domain: [0, 1]
+    notes: >
+      0 = same-day settlement, 1 = next business day, based on the
+      submission-time cutoff (R-WP-008). Zero for a rejected payment.
