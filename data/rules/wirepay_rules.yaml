@@ -1,0 +1,60 @@
+# wirepay_rules.yaml
+# SME-validated business rules for WIREPAY (domestic outbound wire
+# payments), R-WP-001 to R-WP-008.
+# Authoritative but, as with INTCALC's validated_rules.yaml, not
+# complete: see R-WP-003's ambiguity note, R-WP-005's rounding-mode
+# silence, and the undocumented large-wire review fee the traceability
+# checker will find that NO rule below describes.
+schema_version: 1
+rules:
+
+  - id: R-WP-001
+    statement: >
+      The beneficiary routing number must be exactly 9 numeric digits.
+      Any non-numeric content (letters, blanks, a short value) rejects
+      the payment with reason INVALID_ROUTING.
+    fields: [beneficiary_routing, status, reject_reason]
+
+  - id: R-WP-002
+    statement: >
+      The wire amount must be strictly greater than zero. A zero or
+      negative amount rejects the payment with reason INVALID_AMOUNT.
+    fields: [amount, status, reject_reason]
+
+  - id: R-WP-003
+    statement: >
+      The base wire fee is a flat $25.00 for amounts up to $10,000.00,
+      and a flat $15.00 for amounts above $10,000.00.
+    fields: [amount, total_fee]
+
+  - id: R-WP-004
+    statement: >
+      A priority (expedited) wire adds a flat $10.00 surcharge on top
+      of the base fee.
+    fields: [priority_flag, total_fee]
+
+  - id: R-WP-005
+    statement: >
+      A compliance-monitoring surcharge of 0.01% of the wire amount is
+      added to the fee, rounded to the nearest cent.
+    fields: [amount, total_fee]
+
+  - id: R-WP-006
+    statement: >
+      The total fee charged is the sum of the base fee, the priority
+      surcharge (if any) and the compliance-monitoring surcharge.
+    fields: [total_fee]
+
+  - id: R-WP-007
+    statement: >
+      The total amount debited from the originating account is the
+      wire amount plus the total fee. A rejected payment debits
+      nothing.
+    fields: [amount, total_fee, total_debit, status]
+
+  - id: R-WP-008
+    statement: >
+      A wire submitted strictly before the 15:00 domestic cutoff
+      settles same-day. A wire submitted at or after the cutoff
+      settles the next business day.
+    fields: [submit_hh, submit_mm, value_date_offset]
