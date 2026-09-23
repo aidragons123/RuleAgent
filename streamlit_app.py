@@ -11,12 +11,21 @@ Run with: streamlit run streamlit_app.py   (or `make ui`)
 """
 from __future__ import annotations
 
+import csv
 import datetime as _dt
+import hashlib
+import io
+import json
 import os
 import re
+import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from dataclasses import replace as _dc_replace
 from pathlib import Path
 
 import pandas as pd
@@ -24,10 +33,17 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from ai.bug_injector import BugInjectorAI  # noqa: E402
+import core.differential as _differential  # noqa: E402
+import core.pipeline as _pipeline_mod  # noqa: E402
 from ai.implementation import BUG_VARIANTS  # noqa: E402
 from ai_platform.config import get_config  # noqa: E402
+from ai_platform.tracer import Tracer as _Tracer  # noqa: E402
+from core import cobol_runner as _cobol_runner  # noqa: E402
+from core.bulk_loader import generate_sample_bulk_csv, load_bulk_vectors_from_csv  # noqa: E402
+from core.harness import coverage_from_matrix  # noqa: E402
+from core.java_runner import JavaGeneratedModule, JavaRunnerError  # noqa: E402
 from core.pipeline import Pipeline, load_heldback_vectors, load_seed_vectors  # noqa: E402
+from core.rules_loader import load_signature  # noqa: E402
 
 st.set_page_config(
     page_title="CodeVerus — From Legacy COBOL to Verified Modern Code",
@@ -35,6 +51,20 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ai_platform/llm_client.py reads the API key from os.environ, but on
+# Streamlit Cloud a value entered in the app's Secrets box lands in
+# st.secrets, not necessarily in the process environment. Bridge it
+# explicitly so "real" LLM mode works regardless of which one actually
+# gets populated - this is a no-op wherever the env var is already set
+# (e.g. local `export ANTHROPIC_API_KEY=...`).
+if not os.environ.get("ANTHROPIC_API_KEY"):
+    try:
+        _secret_key = st.secrets.get("ANTHROPIC_API_KEY")
+    except Exception:
+        _secret_key = None
+    if _secret_key:
+        os.environ["ANTHROPIC_API_KEY"] = _secret_key
 
 # ----------------------------------------------------------------- style
 # Fixed status palette (never themed / never reused for series color) —
@@ -163,6 +193,32 @@ st.markdown(
     .div-box .div-box-label { font-size:.72rem; font-weight:700; letter-spacing:.03em; text-transform:uppercase; opacity:.7; }
     .div-box .div-box-value { font-size:1.15rem; font-weight:800; font-family: monospace; margin-top:.1rem; }
 
+    /* --------------------------------------------------- result scoreboard */
+    .score-panel {
+        background:#ffffff; border:1px solid #eaecef; border-radius:16px;
+        border-top:5px solid var(--accent, #2a78d6);
+        padding:1.15rem 1.35rem 1.25rem; height:100%;
+        box-shadow:0 2px 10px rgba(20,36,58,.05);
+    }
+    .score-title {
+        font-size:.74rem; font-weight:800; letter-spacing:.09em;
+        text-transform:uppercase; color:#6b7280;
+    }
+    .score-headline { font-size:2.9rem; font-weight:800; color:#14243a; line-height:1.05; margin-top:.35rem; }
+    .score-sub { font-size:.86rem; color:#5a6472; font-weight:600; }
+    .score-bar {
+        display:flex; width:100%; height:24px; border-radius:8px; overflow:hidden;
+        background:#f0f0ee; border:1px solid #eaecef; margin:.85rem 0 .75rem;
+    }
+    .score-seg { height:100%; min-width:2px; border-right:2px solid #ffffff; }
+    .score-seg:last-child { border-right:none; }
+    .score-rows { display:flex; flex-direction:column; gap:.38rem; }
+    .score-row { display:flex; align-items:center; gap:.5rem; font-size:.88rem; color:#3a4453; }
+    .score-sw { width:12px; height:12px; border-radius:3px; flex:none; }
+    .score-pct { font-weight:800; color:#14243a; min-width:3.6rem; text-align:right; }
+    .score-lbl { flex:1; }
+    .score-cnt { color:#8a94a1; font-size:.82rem; white-space:nowrap; }
+
     /* --- Pin a light theme regardless of the browser/OS dark-mode setting.
        Streamlit's dark theme drives almost everything through these CSS
        variables, so overriding them at :root (not just individual
@@ -211,54 +267,148 @@ st.markdown(
         color: #9aa0ab !important;
     }
 
-    /* ---------------------------------------------------- colored sidebar */
+    /* ------------------------------------------------------- sidebar theme
+       A single deep-indigo gradient with one consistent teal accent,
+       replacing the earlier dark-slate panel with mismatched per-card
+       orange/pink/purple borders — one accent family reads calmer and
+       more premium than a different color per section. */
     section[data-testid="stSidebar"],
     section[data-testid="stSidebar"] > div {
-        background: linear-gradient(180deg, #1c2128 0%, #262c35 55%, #2f3542 100%) !important;
-        color: #eef0f3 !important;
+        background: linear-gradient(165deg, #0b1220 0%, #121b33 45%, #16213f 100%) !important;
+        color: #e7ecf5 !important;
     }
     section[data-testid="stSidebar"] * {
-        color: #eef0f3 !important;
+        color: #e7ecf5 !important;
     }
-    section[data-testid="stSidebar"] h3 {
-        font-weight: 800 !important; letter-spacing: .01em;
+
+    /* "## CodeVerus" wordmark at the top of the sidebar */
+    section[data-testid="stSidebar"] h2 {
+        font-weight: 800 !important;
+        letter-spacing: .02em;
+        background: linear-gradient(120deg, #5eead4 0%, #7dd3fc 100%);
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: .1rem !important;
     }
+    section[data-testid="stSidebar"] [data-testid="stCaptionContainer"]:first-of-type,
+    section[data-testid="stSidebar"] > div > div > div:nth-child(2) .stCaption {
+        color: #8aa0c4 !important;
+        letter-spacing: .02em;
+    }
+
+    /* Section headings ("#### Choose what to test", etc.) — small teal
+       eyebrow label instead of plain bold white, so each card's purpose
+       is scannable at a glance. */
+    section[data-testid="stSidebar"] h4 {
+        font-weight: 700 !important;
+        font-size: .92rem !important;
+        letter-spacing: .03em;
+        text-transform: uppercase;
+        color: #5eead4 !important;
+        margin-bottom: .55rem !important;
+        padding-bottom: .5rem !important;
+        border-bottom: 1px solid #ffffff1c !important;
+    }
+
     section[data-testid="stSidebar"] hr {
-        border-color: #ffffff2a !important;
+        border-color: #ffffff1c !important;
     }
-    /* Card-grouped sections (st.container(border=True)) inside the sidebar */
+
+    /* Card-grouped sections (st.container(border=True)) inside the sidebar —
+       one soft glass-panel treatment, gently lit on hover so the active
+       section reads clearly without needing a different color per card. */
     section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
-        background: #ffffff0f !important;
-        border: 1px solid #ffffff26 !important;
-        border-left: 4px solid #f0b23e !important;
-        border-radius: 12px !important;
-        padding: .3rem .4rem !important;
-        margin-bottom: .9rem !important;
+        background: linear-gradient(160deg, #ffffff10 0%, #ffffff06 100%) !important;
+        border: 1px solid #ffffff1f !important;
+        border-radius: 16px !important;
+        padding: 1.1rem 1rem !important;
+        margin-bottom: 1rem !important;
+        box-shadow: 0 4px 18px rgba(0,0,0,.18) !important;
+        transition: border-color .15s ease, box-shadow .15s ease;
     }
-    /* Slight color variety between the sidebar sections — no blue */
-    section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(2) {
-        border-left-color: #e0729c !important;
+    section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"]:hover {
+        border-color: #5eead450 !important;
+        box-shadow: 0 6px 22px rgba(0,0,0,.24) !important;
     }
-    section[data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"]:nth-of-type(3) {
-        border-left-color: #8b6fd1 !important;
-    }
+
     /* The scope dropdown reads better as a light control against the dark panel */
     section[data-testid="stSidebar"] [data-baseweb="select"] > div {
         background: #ffffff !important;
-        border-radius: 8px !important;
-        border: 1px solid #ffffff40 !important;
+        border-radius: 10px !important;
+        border: 1px solid #ffffff3a !important;
     }
     section[data-testid="stSidebar"] [data-baseweb="select"] * {
-        color: #14243a !important;
+        color: #0b1220 !important;
     }
+    /* The open option list is rendered in a portal outside the sidebar */
+    [data-baseweb="popover"] [role="listbox"],
+    [data-baseweb="popover"] [role="listbox"] * {
+        color: #0b1220 !important;
+    }
+
+    /* Text inputs / text areas / number inputs / file uploader inside the
+       sidebar get the same light-control treatment as the dropdown, for
+       the same readability reason. */
+    section[data-testid="stSidebar"] input,
+    section[data-testid="stSidebar"] textarea {
+        background: #ffffff !important;
+        color: #0b1220 !important;
+        border-radius: 10px !important;
+        border: 1px solid #ffffff3a !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
+        background: #ffffff0d !important;
+        border: 1px dashed #5eead460 !important;
+        border-radius: 12px !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] * {
+        color: #cdd9ee !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button {
+        background: #ffffff14 !important;
+        color: #e7ecf5 !important;
+        border: 1px solid #ffffff3a !important;
+    }
+
     section[data-testid="stSidebar"] .stCaption, section[data-testid="stSidebar"] small {
-        color: #b9cbe0 !important;
+        color: #9db2d4 !important;
+        line-height: 1.5;
     }
     section[data-testid="stSidebar"] code {
-        background: #ffffff1a !important; color: #d7e6f5 !important;
+        background: #5eead422 !important; color: #99f6e4 !important;
     }
-    /* Buttons keep white text on their own colored fill. */
-    section[data-testid="stSidebar"] .stButton button,
+
+    /* Checkboxes/radios pick up the same teal accent as everything else. */
+    section[data-testid="stSidebar"] [data-baseweb="checkbox"] svg,
+    section[data-testid="stSidebar"] [data-baseweb="radio"] svg {
+        fill: #5eead4 !important;
+    }
+
+    /* Buttons: one teal-to-blue gradient family for the sidebar, distinct
+       from the primary red "Run pipeline" call-to-action, which keeps its
+       own warmer accent so it still reads as the main action. */
+    section[data-testid="stSidebar"] .stButton button {
+        color: #ffffff !important;
+        background: linear-gradient(120deg, #14b8a6 0%, #0ea5e9 100%) !important;
+        border: none !important;
+        border-radius: 10px !important;
+        font-weight: 700 !important;
+        box-shadow: 0 3px 10px rgba(14,165,233,.25) !important;
+        transition: filter .15s ease, box-shadow .15s ease;
+    }
+    section[data-testid="stSidebar"] .stButton button:hover {
+        filter: brightness(1.08);
+        box-shadow: 0 5px 16px rgba(14,165,233,.35) !important;
+    }
+    section[data-testid="stSidebar"] button[data-testid="stBaseButton-primary"] {
+        background: linear-gradient(120deg, #e0503a 0%, #d6402e 100%) !important;
+        box-shadow: 0 3px 10px rgba(214,64,46,.3) !important;
+    }
+    section[data-testid="stSidebar"] button[data-testid="stBaseButton-primary"]:hover {
+        filter: brightness(1.08);
+        box-shadow: 0 5px 16px rgba(214,64,46,.4) !important;
+    }
     [data-testid="stMain"] .stButton button {
         color: #ffffff !important;
         background: linear-gradient(120deg, #e0503a 0%, #d6402e 100%) !important;
@@ -276,42 +426,291 @@ st.markdown(
 )
 
 
+# ------------------------------------------------------------- fast path
+# The differential step is what makes a run slow: core/differential.py walks
+# the vectors one at a time, and each one launches a COBOL process (~55 ms)
+# and a fresh JVM (~110 ms) — ~50 s for a 279-vector full run. core/ is
+# write-locked (`make verify` checksums everything outside ai/), so the
+# speed-ups live here instead. Three of them, none of which changes a single
+# computed value:
+#
+#   1. The generated Java runs ALL vectors through ONE JVM (see the batch
+#      runner below) instead of one JVM per vector.
+#   2. The COBOL oracle cannot be batched — INTCALC.cbl does ACCEPT ...
+#      STOP RUN, one line per process, and the file is checksum-locked — so
+#      its outputs are memoised to disk instead, keyed by the hash of the
+#      compiled binary. The values still come from real oracle runs; they
+#      are just not recomputed once the same binary has already answered the
+#      same input. A rebuilt INTCALC.cbl changes the hash and voids the file.
+#   3. javac is memoised on the source hash, so re-running the same variant
+#      skips the compile.
+#
+# Everything is keyed on the hash of the artefact that produced it, so a
+# bug-injected variant can never be served a clean variant's answers.
+_WORKERS = min(16, (os.cpu_count() or 4) * 2)
+_REPO_ROOT = Path(__file__).resolve().parent
+_CACHE_DIR = _REPO_ROOT / "out"
+# One subdirectory per generated-source hash, so two variants never share
+# (and never overwrite) each other's .class files.
+_BUILD_ROOT = _REPO_ROOT / "generated" / "javabuild"
+
+# Wrapper that drives the AI-generated class over the same pipe-delimited
+# wire protocol, in one JVM. It does not modify (or subclass, or reach into)
+# the generated class: it calls the same static compute(String[]) entry point
+# main() calls, once per input line. GeneratedIntcalc holds no mutable static
+# state — every field it declares is `static final` — so vectors cannot leak
+# into each other; this is the same isolation the per-vector JVM gave.
+_BATCH_RUNNER = """
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+
+public class BatchRunner {
+    public static void main(String[] args) throws Exception {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
+        StringBuilder out = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            if (line.isEmpty()) continue;
+            try {
+                String[] result = GeneratedIntcalc.compute(line.split("\\\\|", -1));
+                out.append("OK\\t").append(String.join("|", result)).append('\\n');
+            } catch (Throwable t) {
+                // Mirrors the per-vector runner: one bad vector must not
+                // take down the rest of the batch.
+                out.append("ERR\\t").append(t).append('\\n');
+            }
+        }
+        System.out.print(out);
+    }
+}
+"""
+
+
+def _digest(*chunks: bytes) -> str:
+    h = hashlib.sha256()
+    for c in chunks:
+        h.update(c)
+    return h.hexdigest()[:16]
+
+
+def _load_disk_cache(name: str) -> dict:
+    path = _CACHE_DIR / f".cache_{name}.json"
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}  # missing or corrupt cache is never fatal — just recompute
+
+
+def _save_disk_cache(name: str, data: dict) -> None:
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        (_CACHE_DIR / f".cache_{name}.json").write_text(json.dumps(data))
+    except Exception:
+        pass  # a cache we cannot persist is a slow run, not a broken one
+
+
+def _install_fast_differential() -> None:
+    if getattr(_pipeline_mod.run_differential, "_fast", False):
+        return  # already installed in this server process
+
+    original_oracle = _differential.run_oracle
+    original_differential = _pipeline_mod.run_differential
+
+    oracle_memo: dict = {}          # {binary_hash: {wire_line: output_dict}}
+    java_memo: dict = {}            # {class_hash:  {wire_line: output_dict}}
+    compiled: dict = {}             # {source_hash: build_dir}
+    lock = threading.Lock()
+
+    # ---------------------------------------------------------- COBOL side
+    def oracle_bucket() -> tuple[str, dict]:
+        binary = _cobol_runner.ensure_compiled()   # rebuilds if INTCALC.cbl changed
+        key = _digest(binary.read_bytes())
+        if key not in oracle_memo:
+            with lock:
+                oracle_memo[key] = _load_disk_cache(f"oracle_{key}")
+        return key, oracle_memo[key]
+
+    def cached_oracle(vector_input, sig):
+        key, bucket = oracle_bucket()
+        line = _cobol_runner.encode_input(vector_input, sig)
+        hit = bucket.get(line)
+        if hit is None:
+            hit = original_oracle(vector_input, sig)
+            with lock:
+                bucket[line] = hit
+        return dict(hit)
+
+    def fill_oracle(vectors, sig) -> None:
+        """Runs the real oracle for every input not already memoised. One
+        process per vector is unavoidable here, so they run concurrently."""
+        key, bucket = oracle_bucket()
+        missing = {_cobol_runner.encode_input(v.input, sig): v.input
+                   for v in vectors if _cobol_runner.encode_input(v.input, sig) not in bucket}
+        if not missing:
+            return
+        with ThreadPoolExecutor(max_workers=_WORKERS) as pool:
+            results = pool.map(lambda i: original_oracle(i, sig), missing.values())
+            for line, out in zip(missing, results):
+                bucket[line] = out
+        _save_disk_cache(f"oracle_{key}", bucket)
+
+    # ----------------------------------------------------------- Java side
+    def cached_compile(source):
+        """Compiles each distinct generated source into its OWN build dir,
+        keyed by the hash of that source.
+
+        core/java_runner.py deliberately recompiles on every call so that a
+        bug-injected variant can never be served from a stale .class file.
+        Caching the compile WITHOUT also separating the output directories
+        reintroduces exactly that hazard: every variant writes into one
+        shared generated/javabuild/, so a cache hit can hand back a
+        directory that a different variant has since overwritten — the
+        clean run then silently answers with flawed classes. Per-variant
+        directories keep the caching and the guarantee."""
+        key = _digest(source.content.encode())
+
+        # Always refresh the canonical .java on disk: the "Data & source"
+        # tab reads it, and it must show the variant that just ran.
+        java_file = _REPO_ROOT / source.path
+        java_file.parent.mkdir(parents=True, exist_ok=True)
+        java_file.write_text(source.content)
+
+        if key not in compiled:
+            build_dir = _BUILD_ROOT / key
+            build_dir.mkdir(parents=True, exist_ok=True)
+            runner = build_dir / "BatchRunner.java"
+            runner.write_text(_BATCH_RUNNER)
+            proc = subprocess.run(
+                ["javac", "-d", str(build_dir), str(java_file), str(runner)],
+                capture_output=True, text=True,
+            )
+            if proc.returncode != 0:
+                raise JavaRunnerError(
+                    f"javac failed for {java_file}:\n{proc.stdout}\n{proc.stderr}"
+                )
+            compiled[key] = build_dir
+        return compiled[key]
+
+    def java_bucket(module) -> tuple[str, dict]:
+        classes = sorted(Path(module.build_dir).glob("*.class"))
+        key = _digest(*(p.read_bytes() for p in classes))
+        if key not in java_memo:
+            java_memo[key] = _load_disk_cache(f"java_{key}")
+        return key, java_memo[key]
+
+    def fill_java(vectors, module, sig) -> dict:
+        """Feeds every not-yet-memoised vector through ONE JVM, over the
+        same wire protocol the per-vector runner used."""
+        key, bucket = java_bucket(module)
+        missing = [line for line in
+                   dict.fromkeys(_cobol_runner.encode_input(v.input, sig) for v in vectors)
+                   if line not in bucket]
+        if missing:
+            proc = subprocess.run(
+                ["java", "-cp", str(module.build_dir), "BatchRunner"],
+                input="\n".join(missing) + "\n", capture_output=True, text=True,
+            )
+            if proc.returncode != 0:
+                raise JavaRunnerError(f"batch java run failed:\n{proc.stderr}")
+            replies = [ln for ln in proc.stdout.splitlines() if ln]
+            if len(replies) != len(missing):
+                raise JavaRunnerError(
+                    f"batch java returned {len(replies)} lines for {len(missing)} vectors"
+                )
+            for line, reply in zip(missing, replies):
+                status, _, payload = reply.partition("\t")
+                bucket[line] = (_cobol_runner.decode_output(payload, sig)
+                                if status == "OK" else {"__error__": payload})
+            _save_disk_cache(f"java_{key}", bucket)
+        return bucket
+
+    class MemoisedJava:
+        """Serves the batch's answers through the same .compute(dict) -> dict
+        surface core/differential.py already calls."""
+
+        def __init__(self, bucket: dict, sig):
+            self.bucket = bucket
+            self.sig = sig
+
+        def compute(self, input_dict):
+            out = self.bucket[_cobol_runner.encode_input(input_dict, self.sig)]
+            if "__error__" in out:
+                # core/differential.py catches this and records every output
+                # field as divergent, exactly as it did per-vector.
+                raise JavaRunnerError(out["__error__"])
+            return dict(out)
+
+    # ------------------------------------------------------------ the swap
+    def fast_differential(vectors, module, sig):
+        if not isinstance(module, JavaGeneratedModule):
+            return original_differential(vectors, module, sig)
+        fill_oracle(vectors, sig)
+        bucket = fill_java(vectors, module, sig)
+        # core/differential.py then runs its own loop and its own comparison
+        # over pre-computed values — the divergence logic stays untouched.
+        return original_differential(vectors, MemoisedJava(bucket, sig), sig)
+
+    fast_differential._fast = True
+    fast_differential._fill_oracle = fill_oracle
+    _differential.run_oracle = cached_oracle
+    _differential.compile_java = cached_compile
+    _pipeline_mod.load_generated = _differential.load_generated
+    _pipeline_mod.run_differential = fast_differential
+
+
+_prewarm_started = False
+
+
+def _prewarm() -> None:
+    """Builds the oracle cache for the shipped vectors in the background, so
+    the first click lands on a warm cache instead of paying for 230 COBOL
+    processes. Starts at page load (not at click time, which would be too
+    late to help), runs once per server, and never blocks the page."""
+    global _prewarm_started
+    if _prewarm_started:
+        return
+    _prewarm_started = True
+
+    def work():
+        try:
+            _pipeline_mod.run_differential._fill_oracle(
+                load_seed_vectors() + load_heldback_vectors(), load_signature())
+        except Exception:
+            pass  # a failed pre-warm only means the first run is slower
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+def _install_lazy_trace_flush() -> None:
+    """Tracer rewrites the whole HTML trace after every recorded event, and
+    each rewrite re-renders every prior event, so a full run spends most of
+    its time (O(n^2)) re-writing the same file. Write it at start and at
+    finalize() instead; the finished trace has the same content."""
+    if getattr(_Tracer._flush, "_lazy", False):
+        return
+    original_flush = _Tracer._flush
+
+    def lazy_flush(self):
+        if self.steps and not self.summary:  # mid-run: finalize() writes it out
+            return
+        original_flush(self)
+
+    lazy_flush._lazy = True
+    _Tracer._flush = lazy_flush
+
+
+_install_fast_differential()
+_install_lazy_trace_flush()
+_prewarm()       # at page load, so the cache is filling while the user reads
+
+
 @st.cache_resource
 def get_pipeline() -> Pipeline:
     return Pipeline()
 
 
-RUNS_DIR = Path(__file__).resolve().parent / "runs"
-
-
-def autosave_run(result, label: str) -> Path:
-    """Copy this run's generated Java, evidence pack, and trace into a
-    timestamped folder under runs/, so nothing is lost between app
-    restarts or overwritten by the next click - every run any presenter
-    has ever made stays on disk, not just the most recent one."""
-    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_label = "".join(c if c.isalnum() or c in "-_" else "_" for c in label)[:60]
-    out_dir = RUNS_DIR / f"{ts}_{safe_label}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        (out_dir / Path(result.source.path).name).write_text(result.source.content)
-    except Exception:
-        pass
-    for attr, dest_name in (("evidence_path", "evidence_pack.html"), ("trace_path", None)):
-        src = getattr(result, attr, None)
-        if not src:
-            continue
-        src = Path(src)
-        if src.exists():
-            try:
-                (out_dir / (dest_name or src.name)).write_bytes(src.read_bytes())
-            except Exception:
-                pass
-    return out_dir
-
-
 COBOL_SOURCE_PATH = Path(__file__).resolve().parent / "data" / "src" / "legacy" / "INTCALC.cbl"
-COBOL_BACKUP_DIR = RUNS_DIR / "cobol_backups"
+COBOL_BACKUP_DIR = Path(__file__).resolve().parent / "runs" / "cobol_backups"
 
 
 def _to_raw_github_url(url: str) -> str:
@@ -333,6 +732,63 @@ def fetch_cobol_source(url: str, timeout: int = 15) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+# The happy flow is the clean path: the rules this implementation satisfies
+# EXACTLY — every one validated against the real COBOL oracle, zero
+# divergence, nothing left untested. Scoping the run to them is what makes
+# it a happy flow, rather than hiding the rules that fail.
+#
+# The list is deliberately explicit rather than "whatever happened to pass
+# this time": if a future change breaks one of these, the scope reports it
+# as INVALIDATED instead of quietly dropping it from the demo.
+HAPPY_FLOW_RULES = ["R-002", "R-005", "R-006", "R-010", "R-011",
+                    "R-012", "R-013", "R-019", "R-022"]
+
+
+def scope_matrix(result, rule_ids: list[str]):
+    """Restricts a result's traceability matrix — and the counts derived
+    from it — to the rules the scope is actually about.
+
+    core/pipeline.py always builds the matrix over all 24 rules, so a
+    9-rule scope would otherwise report the other 15 as UNTESTED. The
+    counting itself is delegated to core.harness.coverage_from_matrix, so
+    the UI never reimplements how a status maps to a bucket."""
+    rows = [r for r in result.facts.traceability if r.rule_id in rule_ids]
+    cov = coverage_from_matrix(rows)
+    facts = result.facts.model_copy(update={
+        "traceability": rows,
+        "total_rules": cov.total_rules,
+        "rules_validated": cov.validated,
+        "rules_invalidated": cov.invalidated,
+        "rules_uncoverable": cov.uncoverable + cov.untested,
+    })
+    return _dc_replace(result, facts=facts)
+
+
+def exercised_rules(result) -> list[str]:
+    """The rules a run actually exercised — those with at least one citing
+    test vector. The pipeline always builds the matrix over all 24 rules,
+    so scoping to these is what keeps the untouched ones from showing up as
+    UNTESTED noise in a deliberately narrow scope."""
+    return [r.rule_id for r in result.facts.traceability if r.tests]
+
+
+@contextmanager
+def injected_bug(bug: str | None):
+    """Runs the block with UC04_INJECT_BUG set, then restores whatever was
+    there before. ai/implementation.py reads it when it generates the Java,
+    so this is what makes a scope run against deliberately flawed code."""
+    previous = os.environ.get("UC04_INJECT_BUG")
+    if bug:
+        os.environ["UC04_INJECT_BUG"] = bug
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("UC04_INJECT_BUG", None)
+        else:
+            os.environ["UC04_INJECT_BUG"] = previous
+
+
 def run_scope(scope: str):
     pipeline = get_pipeline()
     heldback = load_heldback_vectors()
@@ -341,18 +797,154 @@ def run_scope(scope: str):
     if scope == "Full run (all 24 rules, all vectors)":
         return pipeline.run(include_synthesised=True, extra_vectors=seed + heldback,
                              run_id="ui-full")
-    if scope == "Happy flow (R-004..R-008, R-014, R-016, R-017)":
-        return pipeline.run(include_synthesised=True, extra_vectors=[], run_id="ui-happy",
-                             synthesis_rule_ids=["R-004", "R-005", "R-006", "R-007",
-                                                  "R-008", "R-014", "R-016", "R-017"])
-    if scope == "Rounding (R-009)":
-        return pipeline.run(include_synthesised=True, extra_vectors=[], run_id="ui-rounding",
-                             synthesis_rule_ids=["R-009"])
+    if scope == "Happy flow (clean path)":
+        # Synthesise vectors for the in-scope rules only, then narrow the
+        # matrix to them: 20 vectors, 0 divergences, 9 of 9 validated.
+        result = pipeline.run(include_synthesised=True, extra_vectors=[], run_id="ui-happy",
+                               synthesis_rule_ids=HAPPY_FLOW_RULES)
+        return scope_matrix(result, HAPPY_FLOW_RULES)
+    if scope == "Rounding flaw (R-009)":
+        # The negative counterpart to the happy flow: regenerate the Java
+        # with a real rounding defect in it, then run R-009's own vectors
+        # plus the seed set so the damage is visible across many inputs.
+        with injected_bug("rounding_mode"):
+            result = pipeline.run(include_synthesised=True, extra_vectors=seed,
+                                   run_id="ui-rounding", synthesis_rule_ids=["R-009"])
+        return scope_matrix(result, exercised_rules(result))
     if scope == "Untraceable cap behaviour":
+        # Clean code, but only the vectors that trip the undocumented
+        # interest cap — so what is left is the behaviour no rule explains.
         cap_vectors = [v for v in heldback if "cap" in v.note.lower()]
-        return pipeline.run(include_synthesised=False, extra_vectors=cap_vectors,
-                             run_id="ui-untraceable")
+        result = pipeline.run(include_synthesised=False, extra_vectors=cap_vectors,
+                               run_id="ui-untraceable")
+        return scope_matrix(result, exercised_rules(result))
     raise ValueError(scope)
+
+
+# ---------------------------------------------------------- CSV report
+def build_csv_report(result, scope_label: str, bug: str | None) -> str:
+    """Flattens a run into one CSV report: a summary block, then the
+    rule-by-rule verdicts, then every divergence, then any untraceable
+    findings. Written as labelled sections rather than one wide table so
+    it stays readable when opened straight in Excel."""
+    facts = result.facts
+    diverged = {d.vector_id for d in result.divergences}
+    matched = facts.total_vectors - len(diverged)
+    judged = facts.rules_validated + facts.rules_invalidated
+
+    def p(n, total):
+        return f"{n / total * 100:.1f}%" if total else "n/a"
+
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+
+    w.writerow(["CodeVerus - pipeline report"])
+    w.writerow(["Generated", _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+    w.writerow(["Scope", scope_label])
+    w.writerow(["Generated code", f"flawed on purpose ({bug})" if bug else "clean"])
+    w.writerow([])
+
+    w.writerow(["SUMMARY"])
+    w.writerow(["Metric", "Count", "Percent"])
+    w.writerow(["Rules in scope", facts.total_rules, ""])
+    w.writerow(["Succeeded - validated flawless", facts.rules_validated,
+                p(facts.rules_validated, facts.total_rules)])
+    w.writerow(["Failed - flaw found", facts.rules_invalidated,
+                p(facts.rules_invalidated, facts.total_rules)])
+    w.writerow(["Not testable - uncoverable/untested", facts.rules_uncoverable,
+                p(facts.rules_uncoverable, facts.total_rules)])
+    w.writerow(["Pass rate (judgeable rules only)", judged, p(facts.rules_validated, judged)])
+    w.writerow(["Test vectors executed", facts.total_vectors, ""])
+    w.writerow(["Vectors matching the oracle", matched, p(matched, facts.total_vectors)])
+    w.writerow(["Vectors diverged", len(diverged), p(len(diverged), facts.total_vectors)])
+    w.writerow(["Field-level divergence records", facts.total_divergences, ""])
+    w.writerow(["Untraceable-behaviour findings", len(facts.untraceable_findings), ""])
+    w.writerow([])
+
+    w.writerow(["RULE-BY-RULE VERDICT"])
+    w.writerow(["Rule ID", "Status", "Status meaning", "Flaw side",
+                "Citing tests", "Citing code paths", "Statement"])
+    for row in facts.traceability:
+        meta = STATUS_META.get(row.status, {})
+        w.writerow([row.rule_id, row.status, meta.get("label", ""), row.flaw_side,
+                    len(row.tests), "; ".join(row.code_citations),
+                    " ".join(row.statement.split())])
+    w.writerow([])
+
+    w.writerow(["DIVERGENCES (COBOL oracle vs generated Java)"])
+    w.writerow(["Vector ID", "Field", "COBOL expected", "Java actual", "Rule IDs"])
+    for d in result.divergences:
+        w.writerow([d.vector_id, d.field, d.expected, d.actual, "; ".join(d.rule_ids)])
+    w.writerow([])
+
+    w.writerow(["DIAGNOSES"])
+    w.writerow(["Vector ID", "Field", "Cause", "Explanation", "Suggested fix"])
+    for d in result.diagnoses:
+        w.writerow([d.vector_id, d.field, d.cause,
+                    " ".join(d.explanation.split()),
+                    " ".join((d.fix_suggested or "").split())])
+    w.writerow([])
+
+    w.writerow(["UNTRACEABLE-BEHAVIOUR FINDINGS"])
+    w.writerow(["ID", "Description", "Triggering vectors"])
+    for f in facts.untraceable_findings:
+        w.writerow([f.id, " ".join(f.description.split()), "; ".join(f.triggering_vectors)])
+
+    return buf.getvalue()
+
+
+# ------------------------------------------------------------ bulk CSV report
+def build_bulk_csv_report(bulk, source_label: str) -> str:
+    """Same labelled-sections shape as build_csv_report(), but sized for a
+    batch of hundreds/thousands of records: a summary block, a per-field
+    mismatch breakdown, the rule-level rollup, and every individual
+    divergence with its (deduplicated) diagnosis — not a full evidence
+    pack, which assumes a hand-reviewable vector count."""
+    diag_by_vector = {d.vector_id: d for d in bulk.diagnoses}
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+
+    w.writerow(["CodeVerus - bulk record validation report"])
+    w.writerow(["Generated", _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+    w.writerow(["Batch", source_label])
+    w.writerow(["Generated code validated against", bulk.source.path])
+    w.writerow(["Elapsed", f"{bulk.elapsed_ms / 1000:.1f}s"])
+    w.writerow([])
+
+    w.writerow(["SUMMARY"])
+    w.writerow(["Metric", "Count", "Percent"])
+    w.writerow(["Records validated", bulk.total_records, ""])
+    w.writerow(["Matched the legacy oracle exactly", bulk.matched_records, f"{bulk.pass_rate:.1f}%"])
+    w.writerow(["Diverged on at least one field", bulk.mismatched_records,
+                f"{100 - bulk.pass_rate:.1f}%" if bulk.total_records else ""])
+    w.writerow(["Field-level divergence records", len(bulk.divergences), ""])
+    w.writerow(["Distinct failure patterns diagnosed",
+                len({(d.field, tuple(d.rule_ids)) for d in bulk.divergences}), ""])
+    w.writerow([])
+
+    w.writerow(["PER-FIELD MISMATCH COUNTS"])
+    w.writerow(["Field", "Mismatches"])
+    for field_name, count in bulk.per_field_mismatch_counts().items():
+        w.writerow([field_name, count])
+    w.writerow([])
+
+    w.writerow(["RULE-LEVEL ROLLUP"])
+    w.writerow(["Rule ID", "Status", "Records citing this rule"])
+    for row in bulk.matrix:
+        w.writerow([row.rule_id, row.status, len(row.tests)])
+    w.writerow([])
+
+    w.writerow(["EVERY DIVERGENCE (record, field, expected vs actual, diagnosis)"])
+    w.writerow(["Record ID", "Field", "Legacy (expected)", "Generated (actual)",
+                "Rule IDs", "Cause", "Explanation"])
+    for d in bulk.divergences:
+        diag = diag_by_vector.get(d.vector_id)
+        w.writerow([
+            d.vector_id, d.field, d.expected, d.actual, "; ".join(d.rule_ids),
+            diag.cause if diag else "", " ".join((diag.explanation if diag else "").split()),
+        ])
+
+    return buf.getvalue()
 
 
 # ------------------------------------------------------------------ hero
@@ -375,24 +967,20 @@ SCOPE_OPTIONS = {
         "help": "Every one of the 24 rules, checked against every test vector.",
     },
     "Happy flow": {
-        "value": "Happy flow (R-004..R-008, R-014, R-016, R-017)",
-        "help": "Just the tiered-interest rate rules (R-004–R-008, R-014, R-016, R-017).",
+        "value": "Happy flow (clean path)",
+        "help": "The 9 rules this implementation satisfies exactly — all validated, "
+                "nothing invalidated, nothing untested.",
     },
-    "Rounding only": {
-        "value": "Rounding (R-009)",
-        "help": "Just R-009, the interest-rounding rule.",
+    "Rounding flaw": {
+        "value": "Rounding flaw (R-009)",
+        "help": "Regenerates the Java with a real rounding defect — interest truncated to "
+                "whole dollars — and runs it. Expect R-009 INVALIDATED, flaw side: code.",
+        "bug": "rounding_mode",
     },
     "Untraceable cap behaviour": {
         "value": "Untraceable cap behaviour",
-        "help": "A code path no rule describes — shows the agent's honesty guardrail.",
-    },
-}
-
-VARIANT_OPTIONS = {
-    "Clean": {"value": None, "help": "Code generated correctly — no bug injected."},
-    **{
-        f"Bug: {v['rule_id']}": {"value": key, "help": v["description"]}
-        for key, v in BUG_VARIANTS.items()
+        "help": "Clean code, run only on the vectors that trip the undocumented interest "
+                "cap — the behaviour no rule describes.",
     },
 }
 
@@ -402,7 +990,7 @@ with st.sidebar:
     st.write("")
 
     with st.container(border=True):
-        st.markdown("#### 0. Load legacy COBOL source (optional)")
+        st.markdown("#### Load legacy COBOL source (optional)")
         current_source_url = st.session_state.get("cobol_source_url")
         if current_source_url:
             st.caption(f"→ Currently validating against code loaded from: {current_source_url}")
@@ -423,64 +1011,18 @@ with st.sidebar:
                    "*revision* of the same program, not an unrelated one.")
 
     with st.container(border=True):
-        st.markdown("#### 1. Choose what to test")
+        st.markdown("#### Choose what to test")
         scope_key = st.selectbox(
             "Scope", list(SCOPE_OPTIONS.keys()), label_visibility="collapsed",
         )
         scope = SCOPE_OPTIONS[scope_key]["value"]
         st.caption(SCOPE_OPTIONS[scope_key]["help"])
 
-    with st.container(border=True):
-        st.markdown("#### 2. Choose the code to check")
-        st.caption(
-            "Run the same rules against the same generated code — clean, "
-            "or with one real bug injected on purpose."
-        )
-        variant_key = st.radio(
-            "Generated implementation", list(VARIANT_OPTIONS.keys()),
-            label_visibility="collapsed",
-        )
-        bug = VARIANT_OPTIONS[variant_key]["value"]
-        st.caption(f"→ {VARIANT_OPTIONS[variant_key]['help']}")
-
     run_clicked = st.button("▶  Run pipeline", type="primary", use_container_width=True)
 
     prior_result = st.session_state.get("result")
     with st.container(border=True):
-        st.markdown("#### 3. AI bug injection")
-        if prior_result is None:
-            st.caption(
-                "Run the pipeline once (clean) above first — then come back here to "
-                "have the LLM introduce its own bug into that generated code and "
-                "re-validate, without regenerating anything."
-            )
-            target_rule_id = None
-            inject_clicked = False
-        else:
-            rule_ids = [r.id for r in prior_result.rules]
-            target_rule_id = st.selectbox(
-                "Rule to break", rule_ids, label_visibility="collapsed",
-            )
-            llm_mode = os.environ.get("UC04_LLM_MODE", get_config()["llm"]["mode"])
-            if llm_mode == "real":
-                st.caption(
-                    f"→ Asks Claude to introduce one realistic defect into the last "
-                    f"generated code, targeting **{target_rule_id}**, then re-runs the "
-                    f"same test vectors against it — no regeneration."
-                )
-            else:
-                st.caption(
-                    "→ Currently in **mock mode**: uses the same 3 built-in canned bugs "
-                    "(by rule id) as option 2 above, applied to the last generated code. "
-                    "Set `llm.mode: real` in `ai_platform/config.yaml` for Claude to "
-                    "author a genuinely new bug."
-                )
-            inject_clicked = st.button(
-                "🐛  Inject AI bug & re-validate", use_container_width=True,
-            )
-
-    with st.container(border=True):
-        st.markdown("#### 4. Modify a rule & re-validate")
+        st.markdown("#### Modify a rule & re-validate")
         if prior_result is None:
             st.caption(
                 "Run the pipeline once (clean) above first — then come back here to "
@@ -521,6 +1063,45 @@ with st.sidebar:
                 "✏️  Modify rule & re-validate", use_container_width=True,
             )
 
+    with st.container(border=True):
+        st.markdown("#### Bulk record validation")
+        if prior_result is None:
+            st.caption(
+                "Run the pipeline once above first — bulk validation checks a large "
+                "batch of records against the code that run already generated, it "
+                "doesn't generate anything new."
+            )
+            bulk_run_clicked = False
+            bulk_file = None
+            bulk_use_sample = False
+        else:
+            st.caption(
+                "Upload a CSV of many input records (e.g. a month of account "
+                "activity) and validate every one against the already-generated "
+                "implementation — same oracle-vs-generated-code check as a single "
+                "vector, just run at volume, with AI diagnosis reused across "
+                "records that fail for the same reason instead of re-explaining "
+                "each one."
+            )
+            bulk_file = st.file_uploader(
+                "Bulk records CSV", type=["csv"], key="bulk_csv_upload",
+                label_visibility="collapsed",
+            )
+            bulk_use_sample = st.checkbox(
+                "No file handy — generate a synthetic sample batch instead",
+                key="bulk_use_sample",
+            )
+            bulk_n = 500
+            if bulk_use_sample:
+                bulk_n = st.number_input(
+                    "Sample size", min_value=10, max_value=20000, value=500, step=50,
+                    key="bulk_sample_n",
+                )
+            bulk_run_clicked = st.button(
+                "📦  Run bulk validation", use_container_width=True,
+                disabled=not (bulk_file is not None or bulk_use_sample),
+            )
+
 
 if load_cobol_clicked:
     if not github_url.strip():
@@ -554,6 +1135,11 @@ if load_cobol_clicked:
         except Exception as exc:
             st.error(f"Failed to load COBOL source: {exc}")
 
+# There is no code-variant picker any more: the scope decides whether the
+# run uses clean or deliberately flawed code (run_scope injects it), and
+# UC04_INJECT_BUG set before launch still applies to the scopes that don't.
+bug = SCOPE_OPTIONS[scope_key].get("bug") or os.environ.get("UC04_INJECT_BUG")
+
 if run_clicked:
     # Keep the run this button-click is about to replace, so a "compare
     # with previous run" view is possible without re-running anything.
@@ -561,74 +1147,47 @@ if run_clicked:
         st.session_state["prev_result"] = st.session_state["result"]
         st.session_state["prev_label"] = st.session_state.get("run_label", "previous run")
 
-    if bug:
-        os.environ["UC04_INJECT_BUG"] = bug
-    else:
-        os.environ.pop("UC04_INJECT_BUG", None)
-    with st.spinner(f"Running: {scope} ({'clean' if not bug else bug})..."):
+    with st.spinner(f"Running: {scope}..."):
         new_result = run_scope(scope)
         st.session_state["result"] = new_result
         st.session_state["scope"] = scope
+        st.session_state["scope_key"] = scope_key   # drives the default rule filter
         st.session_state["bug"] = bug
-        st.session_state["ai_bug"] = None
         st.session_state["rule_change"] = None
-        run_label = f"{scope_key} · {variant_key}"
+        run_label = f"{scope_key} · {_dt.datetime.now():%H:%M:%S}"
         st.session_state["run_label"] = run_label
-    os.environ.pop("UC04_INJECT_BUG", None)
 
-    save_dir = autosave_run(new_result, run_label)
-    st.session_state["last_save_dir"] = str(save_dir)
+    _f = new_result.facts
+    _judged = _f.rules_validated + _f.rules_invalidated
+    _all = _judged + _f.rules_uncoverable
+    _diverged = len({d.vector_id for d in new_result.divergences})
+    _now = _dt.datetime.now()
+    # The report is built HERE, from this run's own result, and kept with the
+    # history entry. That is what makes every past run individually
+    # downloadable: a later run replaces st.session_state["result"], but each
+    # entry already holds its own finished CSV, so it can never be
+    # regenerated from — or confused with — a different run's numbers.
     st.session_state.setdefault("run_history", []).append({
-        "Time": _dt.datetime.now().strftime("%H:%M:%S"),
+        "Time": _now.strftime("%H:%M:%S"),
         "Scope": scope_key,
-        "Code variant": variant_key,
-        "Validated": new_result.facts.rules_validated,
-        "Invalidated": new_result.facts.rules_invalidated,
-        "Uncoverable/Untested": new_result.facts.rules_uncoverable,
-        "Divergences": new_result.facts.total_divergences,
-        "Saved to": str(save_dir),
+        "Pass rate": f"{_f.rules_validated / _judged * 100:.1f}%" if _judged else "—",
+        "Succeeded": _f.rules_validated,
+        "Failed": _f.rules_invalidated,
+        "Not testable": _f.rules_uncoverable,
+        "Vectors matched": f"{(_f.total_vectors - _diverged) / _f.total_vectors * 100:.1f}%"
+                            if _f.total_vectors else "—",
+        "Divergences": _f.total_divergences,
+        # not shown in the table - carried for the per-run download buttons
+        "_csv": build_csv_report(new_result, scope_key, bug),
+        "_filename": f"codeverus_report_{scope_key.lower().replace(' ', '_')}"
+                     f"_{_now:%Y%m%d_%H%M%S}.csv",
+        "_trace": str(new_result.trace_path),
+        "_bug": bug,
     })
-    # Rerun once so the sidebar's "3. AI bug injection" section (which reads
-    # the just-saved result) reflects it immediately, instead of one click later.
+    # Rerun once so the sidebar's "Modify a rule & re-validate" section (which
+    # reads the just-saved result) reflects it immediately, instead of one
+    # click later.
     st.rerun()
-
-if inject_clicked and target_rule_id is not None:
-    prior = st.session_state.get("result")
-    if prior is None:
-        st.warning("Run the pipeline once (clean) before injecting an AI-authored bug.")
-    else:
-        st.session_state["prev_result"] = prior
-        st.session_state["prev_label"] = st.session_state.get("run_label", "previous run")
-        with st.spinner(f"Asking the LLM to break {target_rule_id}..."):
-            injection = BugInjectorAI().inject(prior.source, prior.rules, target_rule_id)
-        if injection.abstained:
-            st.error(f"Bug injection abstained: {injection.abstain_reason}")
-        else:
-            mutated = injection.value
-            new_result = get_pipeline().validate_source(
-                mutated, prior.vectors, run_id="ui-ai-bug",
-            )
-            st.session_state["result"] = new_result
-            st.session_state["bug"] = None
-            st.session_state["ai_bug"] = {
-                "rule_id": target_rule_id, "description": mutated.bug_description,
-            }
-            st.session_state["rule_change"] = None
-            run_label = f"{st.session_state.get('run_label', 'previous run')} · AI bug: {target_rule_id}"
-            st.session_state["run_label"] = run_label
-
-            save_dir = autosave_run(new_result, run_label)
-            st.session_state["last_save_dir"] = str(save_dir)
-            st.session_state.setdefault("run_history", []).append({
-                "Time": _dt.datetime.now().strftime("%H:%M:%S"),
-                "Scope": "(same vectors as previous run)",
-                "Code variant": f"AI-injected bug: {target_rule_id}",
-                "Validated": new_result.facts.rules_validated,
-                "Invalidated": new_result.facts.rules_invalidated,
-                "Uncoverable/Untested": new_result.facts.rules_uncoverable,
-                "Divergences": new_result.facts.total_divergences,
-                "Saved to": str(save_dir),
-            })
 
 if rule_change_clicked and rule_change_id is not None:
     prior = st.session_state.get("result")
@@ -642,43 +1201,83 @@ if rule_change_clicked and rule_change_id is not None:
         old_statement = next(
             (r.statement for r in prior.rules if r.id == rule_change_id), "",
         )
-        llm_mode_now = os.environ.get("UC04_LLM_MODE", get_config()["llm"]["mode"])
         with st.spinner(f"Regenerating the implementation from the new wording of {rule_change_id}..."):
             new_result = get_pipeline().modify_rule_and_revalidate(
                 rule_change_id, rule_change_text.strip(), prior.vectors, run_id="ui-rule-change",
             )
         st.session_state["result"] = new_result
         st.session_state["bug"] = None
-        st.session_state["ai_bug"] = None
         st.session_state["rule_change"] = {
             "rule_id": rule_change_id, "old_statement": old_statement,
-            "new_statement": rule_change_text.strip(), "mock_mode": llm_mode_now != "real",
+            "new_statement": rule_change_text.strip(),
+            "mock_mode": os.environ.get("UC04_LLM_MODE", get_config()["llm"]["mode"]) != "real",
         }
         run_label = f"{st.session_state.get('run_label', 'previous run')} · rule changed: {rule_change_id}"
         st.session_state["run_label"] = run_label
 
-        save_dir = autosave_run(new_result, run_label)
-        st.session_state["last_save_dir"] = str(save_dir)
+        _f = new_result.facts
+        _judged = _f.rules_validated + _f.rules_invalidated
+        _diverged = len({d.vector_id for d in new_result.divergences})
+        _now = _dt.datetime.now()
         st.session_state.setdefault("run_history", []).append({
-            "Time": _dt.datetime.now().strftime("%H:%M:%S"),
-            "Scope": "(same vectors as previous run)",
-            "Code variant": f"Rule changed: {rule_change_id}",
-            "Validated": new_result.facts.rules_validated,
-            "Invalidated": new_result.facts.rules_invalidated,
-            "Uncoverable/Untested": new_result.facts.rules_uncoverable,
-            "Divergences": new_result.facts.total_divergences,
-            "Saved to": str(save_dir),
+            "Time": _now.strftime("%H:%M:%S"),
+            "Scope": f"Rule changed: {rule_change_id}",
+            "Pass rate": f"{_f.rules_validated / _judged * 100:.1f}%" if _judged else "—",
+            "Succeeded": _f.rules_validated,
+            "Failed": _f.rules_invalidated,
+            "Not testable": _f.rules_uncoverable,
+            "Vectors matched": f"{(_f.total_vectors - _diverged) / _f.total_vectors * 100:.1f}%"
+                                if _f.total_vectors else "—",
+            "Divergences": _f.total_divergences,
+            "_csv": build_csv_report(new_result, f"Rule changed: {rule_change_id}", None),
+            "_filename": f"codeverus_report_rule_change_{rule_change_id.lower()}"
+                         f"_{_now:%Y%m%d_%H%M%S}.csv",
+            "_trace": str(new_result.trace_path),
+            "_bug": None,
         })
+
+if bulk_run_clicked:
+    prior = st.session_state.get("result")
+    if prior is None:
+        st.warning("Run the pipeline once before bulk-validating records against it.")
+    else:
+        try:
+            if bulk_use_sample:
+                bulk_csv_path = generate_sample_bulk_csv(
+                    Path("runs") / "bulk_uploads" / "sample_batch.csv",
+                    get_pipeline().sig, n=int(bulk_n),
+                )
+                bulk_label = f"synthetic sample batch ({int(bulk_n)} records)"
+            else:
+                Path("runs/bulk_uploads").mkdir(parents=True, exist_ok=True)
+                bulk_csv_path = Path("runs/bulk_uploads") / bulk_file.name
+                bulk_csv_path.write_bytes(bulk_file.getvalue())
+                bulk_label = bulk_file.name
+
+            bulk_vectors = load_bulk_vectors_from_csv(bulk_csv_path, get_pipeline().sig)
+            with st.spinner(f"Validating {len(bulk_vectors)} records against the generated code..."):
+                bulk_result = get_pipeline().run_bulk(
+                    bulk_vectors, source=prior.source,
+                    run_id=f"ui-bulk-{_dt.datetime.now():%H%M%S}",
+                )
+            st.session_state["bulk_result"] = bulk_result
+            st.session_state["bulk_label"] = bulk_label
+            st.session_state["bulk_csv_report"] = build_bulk_csv_report(bulk_result, bulk_label)
+            st.session_state["bulk_report_filename"] = (
+                f"codeverus_bulk_report_{_dt.datetime.now():%Y%m%d_%H%M%S}.csv"
+            )
+            st.rerun()
+        except ValueError as exc:
+            st.error(f"Couldn't read that bulk file: {exc}")
 
 result = st.session_state.get("result")
 
 if result is None:
-    st.info("👈 Choose a scope and code variant in the sidebar, then click **Run pipeline**.")
+    st.info("👈 Choose a scope in the sidebar, then click **Run pipeline**.")
     st.stop()
 
 facts = result.facts
 active_bug = st.session_state.get("bug")
-active_ai_bug = st.session_state.get("ai_bug")
 active_rule_change = st.session_state.get("rule_change")
 
 if active_rule_change:
@@ -698,101 +1297,162 @@ if active_rule_change:
             f"change, so expect a genuine divergence — a requirement-drift finding, "
             f"not a coding mistake."
         )
-elif active_ai_bug:
-    st.error(
-        f"🐞 **AI-injected bug — rule `{active_ai_bug['rule_id']}`** — "
-        f"{active_ai_bug['description']} Expect **{active_ai_bug['rule_id']}** to show "
-        f"INVALIDATED below (flaw side: code)."
-    )
 elif active_bug:
     v = BUG_VARIANTS[active_bug]
     st.error(
-        f"🐞 **Bug injected: `{active_bug}`** — {v['description']} "
-        f"Expect **{v['rule_id']}** to show INVALIDATED below (flaw side: code)."
+        f"🐞 **Flawed code generated on purpose — `{active_bug}`:** {v['description']} "
+        f"The Java was regenerated with this defect, compiled, and run against the real "
+        f"COBOL oracle. Expect **{v['rule_id']}** to show INVALIDATED below (flaw side: code)."
     )
 else:
-    st.success("✅ **Clean generated code** — no bug injected. Any real divergence below "
+    st.success("✅ **Clean generated code** — no bug injected. Any divergence below "
                "is a genuine ambiguous-rule, rounding, or untraceable-behaviour finding, "
                "not an implementation defect.")
 
-last_save_dir = st.session_state.get("last_save_dir")
-if last_save_dir:
-    st.caption(f"💾 This run was auto-saved to `{last_save_dir}` (generated code, evidence pack, trace).")
+# The untraceable scope's whole point is these findings, so they lead rather
+# than sitting three tabs away.
+if facts.untraceable_findings:
+    st.warning(
+        f"🕵️ **{len(facts.untraceable_findings)} untraceable-behaviour finding(s)** — the COBOL "
+        f"oracle does something no rule in `validated_rules.yaml` describes. The generated code "
+        f"correctly refused to guess at it, which is why these rules read UNCOVERABLE rather "
+        f"than being quietly 'fixed' to match. Detail in **🔬 Divergences & findings**."
+    )
 
-# --------------------------------------------------------------- metrics
-def kpi_tile(icon: str, value, label: str, accent: str, sub: str = "") -> str:
-    sub_html = f'<div class="kpi-sub">{sub}</div>' if sub else ""
+# ------------------------------------------------------------ scoreboard
+# Two panels, two different denominators, both stated as percentages:
+#   - rules   : how the 24 SME rules came out (the business answer)
+#   - vectors : how many executed tests matched the oracle (the run answer)
+# They are deliberately kept apart — a rule is not a test, and one rule can
+# be exercised by many vectors, so mixing them into one "pass rate" would be
+# a meaningless number.
+def score_panel(title: str, headline: str, headline_sub: str, accent: str,
+                rows: list[tuple[str, str, int, float]]) -> str:
+    """rows: (color, label, count, pct) — rendered as a stacked bar + legend."""
+    bar = "".join(
+        f'<div class="score-seg" title="{label}: {pct:.1f}%" '
+        f'style="width:{pct:.3f}%; background:{color};"></div>'
+        for color, label, count, pct in rows if pct > 0
+    )
+    legend = "".join(
+        f'<div class="score-row">'
+        f'<span class="score-sw" style="background:{color};"></span>'
+        f'<span class="score-pct">{pct:.1f}%</span>'
+        f'<span class="score-lbl">{label}</span>'
+        f'<span class="score-cnt">{count}</span></div>'
+        for color, label, count, pct in rows
+    )
     return f"""
-    <div class="kpi-tile" style="--accent:{accent};">
-        <div class="kpi-icon">{icon}</div>
-        <div class="kpi-value">{value}</div>
-        <div class="kpi-label">{label}</div>
-        {sub_html}
+    <div class="score-panel" style="--accent:{accent};">
+        <div class="score-title">{title}</div>
+        <div class="score-headline">{headline}</div>
+        <div class="score-sub">{headline_sub}</div>
+        <div class="score-bar">{bar}</div>
+        <div class="score-rows">{legend}</div>
     </div>
     """
 
-total_rules = facts.rules_validated + facts.rules_invalidated + facts.rules_uncoverable
-pct = f"{facts.rules_validated / total_rules:.0%}" if total_rules else "—"
 
-k1, k2, k3, k4 = st.columns(4)
-k1.markdown(kpi_tile("✅", facts.rules_validated, "Validated — flawless",
-                      STATUS_META["VALIDATED"]["border"]), unsafe_allow_html=True)
-k2.markdown(kpi_tile("❌", facts.rules_invalidated, "Invalidated — flaw found",
-                      STATUS_META["INVALIDATED_DEFECT"]["border"]), unsafe_allow_html=True)
-k3.markdown(kpi_tile("◻️", facts.rules_uncoverable, "Uncoverable / untested",
-                      STATUS_META["UNCOVERABLE"]["border"]), unsafe_allow_html=True)
-k4.markdown(kpi_tile("🔍", facts.total_divergences, "Divergences found", ACCENT_NEUTRAL,
-                      sub=f"over {facts.total_vectors} test vectors"), unsafe_allow_html=True)
+def _pct(n: int, total: int) -> float:
+    return (n / total * 100) if total else 0.0
+
+
+# ---- axis 1: the 24 business rules
+n_rules = facts.rules_validated + facts.rules_invalidated + facts.rules_uncoverable
+n_ok, n_bad, n_na = facts.rules_validated, facts.rules_invalidated, facts.rules_uncoverable
+n_testable = n_ok + n_bad          # rules this module can actually be judged on
+
+# ---- axis 2: the test vectors actually executed
+diverged_ids = {d.vector_id for d in result.divergences}
+n_vec = facts.total_vectors
+n_vec_bad = len(diverged_ids)
+n_vec_ok = n_vec - n_vec_bad
+
+c_ok = STATUS_META["VALIDATED"]["border"]
+c_bad = STATUS_META["INVALIDATED_DEFECT"]["border"]
+c_na = STATUS_META["UNCOVERABLE"]["border"]
+
+p1, p2 = st.columns(2)
+p1.markdown(score_panel(
+    "Rule validation · success rate",
+    f"{_pct(n_ok, n_rules):.1f}%",
+    f"{n_ok} of {n_rules} rules validated flawless",
+    c_ok,
+    [(c_ok, "Succeeded — validated flawless", n_ok, _pct(n_ok, n_rules)),
+     (c_bad, "Failed — flaw found", n_bad, _pct(n_bad, n_rules)),
+     (c_na, "Not testable — uncoverable / untested", n_na, _pct(n_na, n_rules))],
+), unsafe_allow_html=True)
+
+p2.markdown(score_panel(
+    "Test execution · match rate",
+    f"{_pct(n_vec_ok, n_vec):.1f}%",
+    f"{n_vec_ok} of {n_vec} vectors matched the COBOL oracle exactly",
+    ACCENT_NEUTRAL,
+    [(c_ok, "Succeeded — output identical to oracle", n_vec_ok, _pct(n_vec_ok, n_vec)),
+     (c_bad, "Diverged — at least one field differs", n_vec_bad, _pct(n_vec_bad, n_vec))],
+), unsafe_allow_html=True)
 
 st.write("")
 
-if total_rules:
-    st.progress(facts.rules_validated / total_rules,
-                text=f"**{facts.rules_validated} of {total_rules} rules validated ({pct})**")
-
-# ------------------------------------------------- segmented status bar
-status_counts = pd.Series([row.status for row in facts.traceability]).value_counts()
-counts_by_status = {s: int(status_counts.get(s, 0)) for s in STATUS_ORDER}
-total_for_bar = sum(counts_by_status.values())
-
-if total_for_bar:
-    segments_html = "".join(
-        f'<div class="status-bar-seg" title="{STATUS_META[s]["label"]}: {n}" '
-        f'style="width:{n / total_for_bar * 100:.3f}%; background:{STATUS_META[s]["border"]};"></div>'
-        for s, n in counts_by_status.items() if n > 0
+# A scope narrower than the whole rule file must say so, so a 100% score is
+# never read as "all 24 rules pass".
+if st.session_state.get("scope_key") != "Full run" and n_rules < 24:
+    st.info(
+        f"**Scope: {st.session_state.get('scope_key')}** — these percentages cover the "
+        f"{n_rules} rules in this scope, not all 24. Choose **Full run** in the sidebar "
+        f"for the complete picture."
     )
-    legend_html = "".join(
-        f'<span class="status-legend-item">'
-        f'<span class="status-legend-swatch" style="background:{STATUS_META[s]["border"]};"></span>'
-        f'{STATUS_META[s]["icon"]} {STATUS_META[s]["label"]} '
-        f'<span class="status-legend-count">({n})</span></span>'
-        for s, n in counts_by_status.items() if n > 0
-    )
+
+# One honest headline: of the rules that CAN be judged, how many passed.
+if n_testable:
     st.markdown(
-        f"""
-        <div class="status-bar-wrap">
-            <div class="status-bar">{segments_html}</div>
-            <div class="status-legend">{legend_html}</div>
-        </div>
-        """,
+        f"#### ✅ {_pct(n_ok, n_testable):.1f}% pass rate on testable rules "
+        f"<span style='font-size:.8rem;font-weight:500;color:#6b7280;'>"
+        f"({n_ok} passed / {n_bad} failed, out of the {n_testable} rules with both a test "
+        f"and a code path — the other {n_na} cannot be judged from this module's output)"
+        f"</span>",
         unsafe_allow_html=True,
     )
 
+with st.expander(f"Breakdown of the {n_bad} failures and {n_na} not-testable rules"):
+    status_counts = pd.Series([row.status for row in facts.traceability]).value_counts()
+    brk = [{"Status": f"{STATUS_META[s]['icon']} {STATUS_META[s]['label']}",
+            "Rules": int(status_counts.get(s, 0)),
+            "% of all rules": f"{_pct(int(status_counts.get(s, 0)), n_rules):.1f}%",
+            "Rules affected": ", ".join(r.rule_id for r in facts.traceability if r.status == s) or "—"}
+           for s in STATUS_ORDER if int(status_counts.get(s, 0)) > 0]
+    st.dataframe(pd.DataFrame(brk), use_container_width=True, hide_index=True)
+    st.caption(
+        f"{facts.total_divergences} field-level divergence records across "
+        f"{n_vec_bad} diverging vectors — one record per (vector, field) pair, so a vector "
+        f"that disagrees on two fields counts twice."
+    )
+
 st.write("")
 
-tabs = st.tabs(["📋 Rule validation report", "🧾 Test vectors", "🔀 Compare runs",
-                "🕘 Run history", "🕵️ Untraceable findings", "📄 Evidence pack sections",
-                "🔬 Divergence gallery", "🧑‍💻 Source code", "🔗 Links & downloads"])
+tabs = st.tabs(["✅ Rule results", "🔬 Divergences & findings", "📄 Evidence pack",
+                "🧾 Data & source", "🕘 History & downloads", "📦 Bulk validation"])
 
 with tabs[0]:
-    st.subheader("Every rule, validated or invalidated")
+    # No per-scope default filter: each scope's matrix already contains
+    # exactly the rules that scope is about, so nothing needs hiding.
+    ran_scope = st.session_state.get("scope_key", "")
+    st.subheader("Every rule in this scope")
     status_filter = st.multiselect(
         "Filter by status", options=sorted(STATUS_LABELS, key=lambda k: k),
         format_func=lambda k: STATUS_LABELS[k], default=[],
+        key=f"status_filter::{ran_scope}",
     )
     rows = facts.traceability
     if status_filter:
         rows = [r for r in rows if r.status in status_filter]
+
+    hidden = len(facts.traceability) - len(rows)
+    if hidden:
+        st.caption(
+            f"Showing **{len(rows)}** of {len(facts.traceability)} rules — {hidden} hidden by "
+            f"the status filter above. Clear the filter to see every rule."
+        )
 
     for row in rows:
         meta = STATUS_META.get(row.status, {"bg": "#fff", "border": "#ccc", "text": "#333",
@@ -825,7 +1485,7 @@ with tabs[0]:
                     if d.fix_suggested:
                         st.caption(f"  Suggested: {d.fix_suggested}")
 
-with tabs[1]:
+with tabs[3]:
     st.subheader("Every test vector used in this run")
     st.caption(
         "The actual inputs fed to both the COBOL oracle and the generated code — "
@@ -846,7 +1506,7 @@ with tabs[1]:
     else:
         st.info("No test vectors recorded for this run.")
 
-with tabs[2]:
+with tabs[4]:
     st.subheader("Compare this run with the previous one")
     prev = st.session_state.get("prev_result")
     if prev is None:
@@ -887,20 +1547,50 @@ with tabs[2]:
         else:
             st.success("No rule changed status between these two runs.")
 
-with tabs[3]:
+with tabs[4]:
+    st.divider()
     st.subheader("Run history (this session)")
     history = st.session_state.get("run_history", [])
     if not history:
         st.info("No runs recorded yet.")
     else:
-        st.dataframe(pd.DataFrame(history), use_container_width=True, hide_index=True)
-        st.caption(
-            f"{len(history)} run(s) this session (this table clears on app restart, "
-            f"but the 'Saved to' folders on disk under `runs/` do not — every run's "
-            f"generated code, evidence pack, and trace stay there permanently)."
-        )
+        # Underscore-prefixed keys carry the per-run payloads, not display data.
+        visible = [{k: v for k, v in row.items() if not k.startswith("_")}
+                   for row in history]
+        st.dataframe(pd.DataFrame(visible), use_container_width=True, hide_index=True)
+        st.caption(f"{len(history)} run(s) this session. Cleared when the app restarts.")
 
-with tabs[4]:
+        st.markdown("#### Download a specific run")
+        st.caption(
+            "Each row below downloads **that run's own report** — the numbers captured "
+            "when it executed, not the latest run's. Newest first."
+        )
+        for i, row in reversed(list(enumerate(history))):
+            tag = f" · 🐞 {row['_bug']}" if row.get("_bug") else ""
+            c1, c2, c3 = st.columns([5, 2, 2])
+            c1.markdown(
+                f"**Run {i + 1}** · {row['Scope']}{tag}<br>"
+                f"<span style='font-size:.82rem;color:#6b7280;'>{row['Time']} · "
+                f"{row['Pass rate']} pass · {row['Succeeded']} succeeded / "
+                f"{row['Failed']} failed · {row['Divergences']} divergences</span>",
+                unsafe_allow_html=True,
+            )
+            c2.download_button(
+                "⬇ Report (CSV)", data=row["_csv"].encode("utf-8-sig"),
+                file_name=row["_filename"], mime="text/csv",
+                use_container_width=True, key=f"dl_csv_{i}",
+            )
+            trace = Path(row["_trace"])
+            if trace.exists():
+                c3.download_button(
+                    "⬇ Trace (HTML)", data=trace.read_bytes(),
+                    file_name=trace.name, mime="text/html",
+                    use_container_width=True, key=f"dl_trace_{i}",
+                )
+            else:
+                c3.caption("trace file gone")
+
+with tabs[1]:
     st.subheader("Code paths no rule describes")
     if not facts.untraceable_findings:
         st.success("None found in this run's vector set.")
@@ -908,13 +1598,14 @@ with tabs[4]:
         st.warning(f"**{f.id}**: {f.description}")
         st.caption(f"Triggering vectors: {', '.join(f.triggering_vectors)}")
 
-with tabs[5]:
+with tabs[2]:
     st.subheader("Change-approval evidence pack sections")
     for kind, text in result.sections.items():
         st.markdown(f"**{kind.replace('_', ' ').title()}**")
         st.write(text)
 
-with tabs[6]:
+with tabs[1]:
+    st.divider()
     st.subheader("Divergence gallery")
     st.caption("Every field-level disagreement between the compiled COBOL oracle and the "
                "generated modern code, for every test vector run.")
@@ -944,7 +1635,8 @@ with tabs[6]:
     if len(result.divergences) > 50:
         st.caption(f"... and {len(result.divergences) - 50} more. See the HTML trace for all of them.")
 
-with tabs[7]:
+with tabs[3]:
+    st.divider()
     st.subheader("Legacy code, business rules, and the AI-generated replacement")
     st.caption("Shown live from disk — the Java below is exactly what this run just "
                "compiled and tested, not a canned example.")
@@ -979,14 +1671,13 @@ with tabs[7]:
                    "static artifact. The legacy COBOL and the rules file, by contrast, "
                    "are permanent and version-controlled.")
 
-with tabs[8]:
+with tabs[4]:
+    st.divider()
+    st.subheader("Reports from this run")
     st.write(f"HTML trace: `{result.trace_path}`")
     st.write(f"Evidence pack: `{result.evidence_path}`")
-    st.write(f"Generated code: `{result.source.path}`")
-    if last_save_dir:
-        st.write(f"This run auto-saved to: `{last_save_dir}`")
     try:
-        dl1, dl2, dl3 = st.columns(3)
+        dl1, dl2 = st.columns(2)
         dl1.download_button("⬇ Download evidence pack (HTML)",
                              data=Path(result.evidence_path).read_bytes(),
                              file_name="evidence_pack.html", mime="text/html",
@@ -995,9 +1686,98 @@ with tabs[8]:
                              data=Path(result.trace_path).read_bytes(),
                              file_name=Path(result.trace_path).name, mime="text/html",
                              use_container_width=True)
-        dl3.download_button("⬇ Download generated Java",
-                             data=result.source.content.encode("utf-8"),
-                             file_name=Path(result.source.path).name, mime="text/plain",
-                             use_container_width=True)
     except Exception as exc:
         st.caption(f"(download unavailable: {exc})")
+
+with tabs[5]:
+    st.subheader("Bulk record validation")
+    st.caption(
+        "Validates a large batch of records — e.g. a month of account activity — "
+        "against the implementation this session already generated. Divergences "
+        "are grouped by failure pattern before diagnosis, so a batch where "
+        "thousands of records fail for the same reason still costs one AI "
+        "explanation, not thousands."
+    )
+    bulk_result = st.session_state.get("bulk_result")
+    if bulk_result is None:
+        st.info(
+            "👈 Upload a CSV of input records (or generate a synthetic sample "
+            "batch) in the sidebar's **Bulk record validation** section, then "
+            "click **Run bulk validation**."
+        )
+    else:
+        bulk_label = st.session_state.get("bulk_label", "")
+        st.caption(f"Batch: **{bulk_label}** · validated against `{bulk_result.source.path}` "
+                   f"in {bulk_result.elapsed_ms / 1000:.1f}s")
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Records validated", f"{bulk_result.total_records:,}")
+        m2.metric("Matched the oracle", f"{bulk_result.matched_records:,}",
+                   f"{bulk_result.pass_rate:.1f}%")
+        m3.metric("Diverged", f"{bulk_result.mismatched_records:,}")
+        m4.metric("Field-level divergences", f"{len(bulk_result.divergences):,}")
+
+        field_counts = bulk_result.per_field_mismatch_counts()
+        if field_counts:
+            st.markdown("#### Mismatches by field")
+            st.dataframe(
+                pd.DataFrame(
+                    [{"Field": k, "Mismatches": v} for k, v in field_counts.items()]
+                ),
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.success("Every record in this batch matched the legacy oracle exactly.")
+
+        st.markdown("#### Rule-level rollup for this batch")
+        st.dataframe(
+            pd.DataFrame([
+                {"Rule": row.rule_id, "Status": row.status,
+                 "Records citing it": len(row.tests)}
+                for row in bulk_result.matrix
+            ]),
+            use_container_width=True, hide_index=True,
+        )
+
+        if bulk_result.untraceable_findings:
+            st.markdown("#### Untraceable-behaviour findings in this batch")
+            for f in bulk_result.untraceable_findings:
+                st.warning(f"**{f.id}**: {f.description} "
+                           f"({len(f.triggering_vectors)} record(s))")
+
+        st.markdown("#### Sample diverged records")
+        st.caption(
+            "Each distinct failure pattern was diagnosed once by DivergenceAI and "
+            "the same explanation applied to every record sharing it — shown below "
+            "per record so you can see exactly which ones."
+        )
+        diag_by_vector = {d.vector_id: d for d in bulk_result.diagnoses}
+        sample_rows = []
+        for d in bulk_result.divergences[:200]:
+            diag = diag_by_vector.get(d.vector_id)
+            sample_rows.append({
+                "Record ID": d.vector_id, "Field": d.field,
+                "Legacy (expected)": d.expected, "Generated (actual)": d.actual,
+                "Cause": diag.cause if diag else "—",
+            })
+        if sample_rows:
+            st.dataframe(pd.DataFrame(sample_rows), use_container_width=True, hide_index=True)
+            if len(bulk_result.divergences) > 200:
+                st.caption(f"... and {len(bulk_result.divergences) - 200} more. "
+                           f"Download the full report below for every record.")
+
+        st.markdown("#### Download")
+        bulk_csv = st.session_state.get("bulk_csv_report")
+        if bulk_csv:
+            st.download_button(
+                "⬇ Full bulk report (CSV)", data=bulk_csv.encode("utf-8-sig"),
+                file_name=st.session_state.get("bulk_report_filename", "bulk_report.csv"),
+                mime="text/csv", use_container_width=True,
+            )
+        trace_path = Path(bulk_result.trace_path)
+        if trace_path.exists():
+            st.download_button(
+                "⬇ Run trace (HTML)", data=trace_path.read_bytes(),
+                file_name=trace_path.name, mime="text/html",
+                use_container_width=True, key="bulk_trace_dl",
+            )
